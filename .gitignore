@@ -1,0 +1,9 @@
+.claude/
+.pio
+.vscode/
+
+# CMake build output
+build/
+CMakeCache.txt
+CMakeFiles/
+extern/
