@@ -11,25 +11,75 @@ narrative.
 
 ## Contents
 
-1. [Hardware overview](#1-hardware-overview)
-2. [Audio path & PCM format](#2-audio-path--pcm-format)
-3. [Click-free envelope (Blackman-Harris)](#3-click-free-envelope-blackman-harris)
-4. [Morse timing (Paris standard)](#4-morse-timing-paris-standard)
-5. [Iambic B keyer](#5-iambic-b-keyer)
-6. [Straight key](#6-straight-key)
-7. [CW decoder](#7-cw-decoder)
-8. [Text playback (MorseGenerator)](#8-text-playback-morsegenerator)
-9. [Display subsystem](#9-display-subsystem)
-10. [Volume control](#10-volume-control)
-11. [ES8388 codec initialisation (Tab5)](#11-es8388-codec-initialisation-tab5)
-12. [Why direct I²S, not M5.Speaker](#12-why-direct-i²s-not-mspeaker)
-13. [Cross-core synchronisation](#13-cross-core-synchronisation)
-14. [Multi-device porting (Tab5 ↔ Cardputer ADV)](#14-multi-device-porting-tab5--cardputer-adv)
-15. [cmorse reference (extern/)](#15-cmorse-reference-extern)
+1. [Repository layout](#1-repository-layout)
+2. [Hardware overview](#2-hardware-overview)
+3. [Audio path & PCM format](#3-audio-path--pcm-format)
+4. [Click-free envelope (Blackman-Harris)](#4-click-free-envelope-blackman-harris)
+5. [Morse timing (Paris standard)](#5-morse-timing-paris-standard)
+6. [Iambic B keyer](#6-iambic-b-keyer)
+7. [Straight key](#7-straight-key)
+8. [CW decoder](#8-cw-decoder)
+9. [Text playback (MorseGenerator)](#9-text-playback-morsegenerator)
+10. [Display subsystem](#10-display-subsystem)
+11. [Volume control](#11-volume-control)
+12. [ES8388 codec initialisation (Tab5)](#12-es8388-codec-initialisation-tab5)
+13. [Why direct I²S, not M5.Speaker](#13-why-direct-i²s-not-mspeaker)
+14. [Cross-core synchronisation](#14-cross-core-synchronisation)
+15. [Multi-device porting (Tab5 ↔ Cardputer ADV)](#15-multi-device-porting-tab5--cardputer-adv)
+16. [cmorse reference (extern/)](#16-cmorse-reference-extern)
 
 ---
 
-## 1. Hardware overview
+## 1. Repository layout
+
+```
+.
+├── src/
+│   ├── main.cpp                  # setup() / loop() — UI + keyboard input
+│   ├── audio_engine.{h,cpp}      # I2S + NS4168 + FreeRTOS audio task
+│   ├── iambic_keyer.{h,cpp}      # Iambic B state machine + decoder ring buffer
+│   ├── straight_keyer.{h,cpp}    # Straight-key state machine + adaptive classifier
+│   ├── morse_key.{h,cpp}         # GPIO ISR paddle input → atomic KeyState
+│   ├── key_envelop.{h,cpp}       # Blackman-Harris envelope tables
+│   ├── morse_encoder.{h,cpp}     # Text → DIT/DAH/CHAR_SPACE/WORD_SPACE sequence
+│   ├── morse_generator.{h,cpp}   # Async player: encoder + envelope + sine gen
+│   ├── morse_decoder.{h,cpp}     # CW-symbol ring buffer → characters
+│   ├── MorseTable.{h,cpp}        # Binary-search Morse alphabet
+│   ├── morse_constants.h         # Shared timing + symbol constants
+│   ├── fast_math.{h,cpp}         # LUT-based sin() for the audio task
+│   ├── display_model.{h,cpp}     # Atomic singleton: text buffer, settings
+│   ├── display_task.{h,cpp}      # Core 0 render loop (~20 fps)
+│   ├── display_interface.h       # Abstract display interface
+│   ├── cardputer_display.{h,cpp} # Cardputer display implementation
+│   ├── ui_layout.h               # Per-device button geometry
+│   └── Log.h                     # Lightweight serial logger
+├── test/
+│   ├── test_framework.h          # Self-contained CHECK / RUN macros
+│   ├── mocks/Arduino.h           # Serial stub (no ESP32 dependency)
+│   ├── test_morse_encoder/       # Alphabet + spacing
+│   ├── test_key_envelop/         # Envelope layout, WPM, ramp cap
+│   ├── test_morse_generator/     # Sample stream, idle behaviour
+│   ├── test_iambic_keyer/        # SWAP / AUTOREPEAT / END-OF-CHAR
+│   ├── test_straight_keyer/      # Bounce guard, adaptive classifier
+│   ├── test_morse_decoder/       # Symbol buffer → character conversion
+│   └── test_display_model/       # Circular buffer + colour attributes
+├── docs/
+│   ├── ARCHITECTURE.md           # This document
+│   └── TESTING.md                # Unit-test framework: CMake / CTest / macros
+├── extern/                       # cmorse reference C source (build only)
+├── CMakeLists.txt                # Native test build (MinGW / GCC / Clang)
+├── platformio.ini                # PlatformIO environments
+├── project.txt                   # Project description for PlatformIO
+├── run_tests.sh                  # Convenience wrapper for native test build
+└── .gitignore
+```
+
+For the unit-test framework (CMake / CTest wiring, `run_tests.sh`,
+`test_framework.h` macros), see [`docs/TESTING.md`](TESTING.md).
+
+---
+
+## 2. Hardware overview
 
 | Feature | Tab5 | Cardputer ADV |
 |---|---|---|
@@ -52,7 +102,7 @@ hardware-specific code paths.
 
 ---
 
-## 2. Audio path & PCM format
+## 3. Audio path & PCM format
 
 The I²S peripheral and both codecs use **signed 16-bit two's complement PCM**:
 
@@ -113,7 +163,7 @@ End-to-end on Tab5: 2.67 ms (DMA) + 0.5 ms (ES8388 analog) ≈ **3.2 ms**.
 
 ---
 
-## 3. Click-free envelope (Blackman-Harris)
+## 4. Click-free envelope (Blackman-Harris)
 
 `KeyEnvelop` (in `src/key_envelop.{h,cpp}`) builds pre-computed amplitude
 envelopes for DIT and DAH elements. The shape is the **integrated
@@ -181,7 +231,7 @@ allocations succeed (so on OOM the old buffer + matching size stay in use).
 
 ---
 
-## 4. Morse timing (Paris standard)
+## 5. Morse timing (Paris standard)
 
 ```
 1 dit unit   = 1.2 / wpm seconds
@@ -223,7 +273,7 @@ fly when keying from a paddle.
 
 ---
 
-## 5. Iambic B keyer
+## 6. Iambic B keyer
 
 `IambicKeyer` (`src/iambic_keyer.{h,cpp}`) implements the Iambic B state
 machine. It reads the `KeyState` written by `MorseKey` ISRs and produces
@@ -324,7 +374,7 @@ forwards to `MorseDecoder::accumulate()`.
 
 ---
 
-## 6. Straight key
+## 7. Straight key
 
 `StraightKeyer` (`src/straight_keyer.{h,cpp}`) is a four-state machine
 (IDLE → RISE → HOLD → FALL → IDLE) that uses the **same `KeyEnvelop`**
@@ -409,7 +459,7 @@ without lock contention.
 
 ---
 
-## 7. CW decoder
+## 8. CW decoder
 
 `MorseDecoder` (`src/morse_decoder.{h,cpp}`) is a **singleton** (static
 methods) that consumes symbols from the iambic keyer's ring buffer and
@@ -438,7 +488,7 @@ differently in the same scroll line.
 
 ---
 
-## 8. Text playback (MorseGenerator)
+## 9. Text playback (MorseGenerator)
 
 `MorseGenerator` (`src/morse_generator.{h,cpp}`) is the async text player.
 `playText("Hello Morse!")` (called from `loop()` or `setup()`) starts
@@ -470,7 +520,7 @@ envelopes are lazily regenerated, and the next element uses the new WPM.
 
 ---
 
-## 9. Display subsystem
+## 10. Display subsystem
 
 The display is a Model-View-Controller-style subsystem: a single
 `MorseModel` singleton holds atomic state, the `DisplayTask` thread polls
@@ -527,7 +577,7 @@ playback. The detailed touch layout is in `src/ui_layout.h`.
 
 ---
 
-## 10. Volume control
+## 11. Volume control
 
 Volume is a percentage 0–100 (default 50) stored on `AudioEngine` as
 `std::atomic<int>`. It is applied independently on each output path.
@@ -579,7 +629,7 @@ non-mute volume.
 
 ---
 
-## 11. ES8388 codec initialisation (Tab5)
+## 12. ES8388 codec initialisation (Tab5)
 
 The ES8388 (I²C 0x10) is configured as an **I²S slave** — the ESP32-P4
 drives all clocks. Init happens in `AudioEngine::initCodec()` after
@@ -638,7 +688,7 @@ clocks, because the codec needs MCLK from I²S to operate.
 
 ---
 
-## 12. Why direct I²S, not M5.Speaker
+## 13. Why direct I²S, not M5.Speaker
 
 `M5.Speaker` (in M5Unified) is designed for **audio clip playback**, not
 real-time synthesis:
@@ -677,7 +727,7 @@ no-op and `AudioEngine` owns `I2S_NUM_0` exclusively.
 
 ---
 
-## 13. Cross-core synchronisation
+## 14. Cross-core synchronisation
 
 All cross-core state lives in `std::atomic`. No mutexes in the real-time
 audio path.
@@ -706,7 +756,7 @@ in a tight loop. A mutex on a Core-0 ISR would cause I²S DMA underrun
 
 ---
 
-## 14. Multi-device porting (Tab5 ↔ Cardputer ADV)
+## 15. Multi-device porting (Tab5 ↔ Cardputer ADV)
 
 The codebase supports both boards from a single source tree via
 `#ifdef BOARD_TAB5` / `#ifdef BOARD_CARDPUTER` guards set by the
@@ -768,12 +818,13 @@ PlatformIO build flags.
 
 ---
 
-## 15. cmorse reference (`extern/`)
+## 16. cmorse reference (`extern/`)
 
 The iambic keyer state machine and decoder ring buffer were ported from
-the cmorse project (Alain M. Lafon, 2018, MIT licence) in `extern/`. The
-port is line-for-line equivalent for the FSM transitions; the C++ side
-adds:
+**[cmorse](https://github.com/fritzsche/cmorse)** — a portable Morse code
+trainer that runs on Windows, Linux, and macOS (Alain M. Lafon, 2018,
+MIT licence) — kept in `extern/` for reference. The port is line-for-line
+equivalent for the FSM transitions; the C++ side adds:
 
 - `std::atomic` key state for cross-core ISR ↔ audio-task communication
 - A `KeyEnvelop` class that pre-computes the BH envelope tables once

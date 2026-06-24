@@ -5,6 +5,27 @@ All notable changes to A1Keyer are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **CI removed.** `.github/workflows/ci.yml` (the matrix of
+  Ubuntu/macOS/Windows × g++/clang++ unit-test runs) has been
+  deleted. The project is a single-maintainer, MIT-licensed
+  open-source effort and the maintainer does not pay for hosted
+  CI. Unit tests are now run on the developer's own machine via
+  the new `run_tests.sh` wrapper (see "Running the unit tests" in
+  the README). The README's "CI policy" section documents the
+  rationale and lists the GitHub paid features (Code Quality, …)
+  that should remain disabled.
+
+### Added
+- `run_tests.sh` — convenience wrapper around `cmake -B build &&
+  cmake --build build && ctest --test-dir build
+  --output-on-failure`. Picks a parallel-job count from `nproc` /
+  `sysctl`, accepts `--clean`, `--verbose`, `--build-only`, and
+  `--jobs N`. The README's "Repository layout" tree already
+  referenced this file; it's now an actual script.
+
 ## [0.1.0] - 2026-06-14
 
 First public release. This is a fresh publication of the A1Keyer firmware
