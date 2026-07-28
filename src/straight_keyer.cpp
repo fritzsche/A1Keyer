@@ -25,6 +25,7 @@
 #include "Log.h"
 #include "morse_encoder.h"
 #include "display_model.h"
+#include "key_event_bus.h"
 #ifndef UNIT_TEST
 #include "morse_key.h"    // for PIN_KEY_DIT (gpio pin assignment)
 #include "audio_engine.h" // for AUDIO_SAMPLE_RATE
@@ -94,6 +95,8 @@ size_t StraightKeyer::fillSamples(int16_t *mono, size_t frames,
             _rampPos = 0;
             _phase = 0.0f;
             _phaseInc = phaseInc;
+            // Notify the central bus that the radio line should go HIGH.
+            KeyEventBus::keyDown();
         }
     }
     if (_state == State::HOLD)
@@ -105,6 +108,7 @@ size_t StraightKeyer::fillSamples(int16_t *mono, size_t frames,
             std::atomic_store(&s_keyState.memory[DIT_IDX], MEMORY_UNSET);
             _state = State::FALL;
             _rampPos = 0;
+            KeyEventBus::keyUp();
         }
     }
 #endif
@@ -122,6 +126,7 @@ size_t StraightKeyer::fillSamples(int16_t *mono, size_t frames,
                 _rampPos = 0;
                 _phase = 0.0f;
                 _phaseInc = phaseInc;
+                KeyEventBus::keyDown();
             }
             else
             {
@@ -157,6 +162,7 @@ size_t StraightKeyer::fillSamples(int16_t *mono, size_t frames,
                 std::atomic_store(&s_keyState.memory[DIT_IDX], MEMORY_UNSET);
                 _state = State::FALL;
                 _rampPos = 0;
+                KeyEventBus::keyUp();
                 mono[i] = static_cast<int16_t>(fastSinNormalized(_phase) * amp);
                 _phase += _phaseInc;
                 if (_phase >= 1.0f)
@@ -366,4 +372,9 @@ void StraightKeyer::reset()
     memset(_ditDahBuf, 0, sizeof(_ditDahBuf));
     rbHead.store(0, std::memory_order_relaxed);
     rbTail.store(0, std::memory_order_relaxed);
+    // If we were keyed when reset was called (e.g. mode-switch from
+    // paddle to straight), release the radio line so the transmitter
+    // is not left keyed. forceAllUp() is idempotent if the line was
+    // already LOW.
+    KeyEventBus::forceAllUp();
 }

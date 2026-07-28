@@ -23,6 +23,8 @@ set(LIB_SOURCES
     src/morse_decoder.cpp
     src/display_model.cpp
     src/MorseTable.cpp
+    src/key_event_bus.cpp
+    src/radio_keyer.cpp
 )
 
 # ---------------------------------------------------------------------------
@@ -37,6 +39,8 @@ foreach(SUITE IN ITEMS
     test_iambic_keyer
     test_morse_decoder
     test_display_model
+    test_key_event_bus
+    test_radio_keyer
 )
     add_executable(${SUITE}
         test/${SUITE}/${SUITE}.cpp

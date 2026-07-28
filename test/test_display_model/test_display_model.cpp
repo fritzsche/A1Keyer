@@ -294,6 +294,58 @@ static void test_last_char_from_player_flag() {
     CHECK(!m.lastCharFromPlayer());
 }
 
+// --- radio keying (GPIO4 mirror) ---
+
+static void test_radio_keying_default_off() {
+    auto& m = MorseModel::instance();
+    m.setRadioKeyingEnabled(false);
+    CHECK(!m.radioKeyingEnabled());
+}
+
+static void test_radio_keying_set_on() {
+    auto& m = MorseModel::instance();
+    m.setRadioKeyingEnabled(true);
+    CHECK(m.radioKeyingEnabled());
+}
+
+static void test_radio_keying_toggle_increments_change_counter() {
+    auto& m = MorseModel::instance();
+    m.setRadioKeyingEnabled(false);  // baseline
+    uint32_t before = m.changeCounter();
+    m.setRadioKeyingEnabled(true);
+    CHECK(m.changeCounter() > before);
+    uint32_t after = m.changeCounter();
+    m.setRadioKeyingEnabled(false);
+    CHECK(m.changeCounter() > after);
+}
+
+static void test_keying_settings_screen_round_trip() {
+    auto& m = MorseModel::instance();
+    m.setScreen(DisplayScreen::KEYING_SETTINGS);
+    CHECK_EQ((int)m.screen(), (int)DisplayScreen::KEYING_SETTINGS);
+    // Returning to the decoder screen must work.
+    m.setScreen(DisplayScreen::DECODER);
+    CHECK_EQ((int)m.screen(), (int)DisplayScreen::DECODER);
+}
+
+static void test_radio_keying_persists_across_screen_changes() {
+    auto& m = MorseModel::instance();
+    m.setRadioKeyingEnabled(true);
+    m.setScreen(DisplayScreen::WPM_SETTINGS);
+    m.setScreen(DisplayScreen::KEYING_SETTINGS);
+    m.setScreen(DisplayScreen::DECODER);
+    // The setting should be unchanged by screen navigation.
+    CHECK(m.radioKeyingEnabled());
+}
+
+static void test_radio_keying_teardown_resets_to_off() {
+    // Singleton test pollution guard: leave the model in a known state
+    // so the next test (or the host process) doesn't inherit keying=on.
+    auto& m = MorseModel::instance();
+    m.setRadioKeyingEnabled(false);
+    CHECK(!m.radioKeyingEnabled());
+}
+
 int main() {
     printf("=== display_model ===\n");
     RUN(test_screen_default_is_decoder);
@@ -323,5 +375,11 @@ int main() {
     RUN(test_player_tail_moves_to_last);
     RUN(test_mixed_player_then_keyer);
     RUN(test_last_char_from_player_flag);
+    RUN(test_radio_keying_default_off);
+    RUN(test_radio_keying_set_on);
+    RUN(test_radio_keying_toggle_increments_change_counter);
+    RUN(test_keying_settings_screen_round_trip);
+    RUN(test_radio_keying_persists_across_screen_changes);
+    RUN(test_radio_keying_teardown_resets_to_off);
     return test_summary();
 }

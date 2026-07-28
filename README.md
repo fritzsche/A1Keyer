@@ -66,6 +66,9 @@ The Cardputer target shares all platform-independent code (`morse_encoder`,
 - **Adjustable settings** — WPM, tone frequency, volume, and keyer type
   (Paddle / Straight) are settable from the keyboard and **persist across
   reboots** (NVS flash).
+- **Radio keying output** — drive a real transceiver's CW input through a
+  PC817 optocoupler. Paddle, straight key, and the keyboard `K` key all
+  mirror the sidetone; default Off. See [`docs/keyer.md`](docs/keyer.md).
 - **Screen-saver** — display dims after 5 minutes of inactivity; any key
   press or paddle touch wakes it and resets the timer.
 
@@ -156,6 +159,7 @@ decoder** with the last ~200 characters of decoded text.
 | **F** | Open **tone Frequency** settings screen |
 | **V** | Open **Volume** settings screen |
 | **M** | Open **keyer Mode** settings screen (Paddle / Straight) |
+| **K** | Open **Radio Keying** settings screen (On / Off). When On, holding `K` on the decoder screen keys the radio as a straight key. See [`docs/keyer.md`](docs/keyer.md). |
 | `;` | Increment value (WPM +1, freq +10 Hz, volume +10) — or select **Paddle** in Mode |
 | `.` | Decrement value — or select **Straight** in Mode |
 | **Enter** | Save current setting to flash (NVS) and close the screen |
@@ -204,6 +208,7 @@ gets attached to GitHub releases as `a1keyer-cardputer-vX.Y.Z-merged.bin`.
 
 | Document | What's in it |
 |---|---|
+| [`docs/keyer.md`](docs/keyer.md) | Radio keying output: PC817 optocoupler wiring, GPIO4 → KEY, settings UI, central key-event bus, safety. |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Firmware internals: audio path, Blackman-Harris envelopes, Iambic B / straight-key FSMs, decoder protocol, ES8388 codec init, display subsystem, cross-core synchronisation, multi-device porting. |
 | [`docs/TESTING.md`](docs/TESTING.md) | Unit-test framework: CMake / CTest wiring, `run_tests.sh`, `test_framework.h` macros, adding a new test suite. |
 

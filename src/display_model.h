@@ -32,7 +32,8 @@ enum class DisplayScreen {
     VOLUME_VIEW,   ///< Overlay: large volume readout, auto-returns after OVERLAY_TIMEOUT_MS.
     VOLUME_SETTINGS, ///< Settings: in-place volume editing with ;/., confirmed with Enter.
     MODE_VIEW,   ///< Overlay: large mode readout, auto-returns after OVERLAY_TIMEOUT_MS.
-    MODE_SETTINGS ///< Settings: in-place mode editing with ;/., confirmed with Enter.
+    MODE_SETTINGS, ///< Settings: in-place mode editing with ;/., confirmed with Enter.
+    KEYING_SETTINGS ///< Settings: in-place on/off radio-keying toggle, ;/., confirmed with Enter.
 };
 
 /** Keyer operating mode. */
@@ -115,6 +116,30 @@ public:
      * @param t  PADDLE or STRAIGHT.
      */
     void setKeyerType(KeyerType t);
+
+    // ─── Radio keying output ──────────────────────────────────────────────────
+
+    /**
+     * radioKeyingEnabled — whether the on-air CW keying output is active.
+     *
+     * When true, GPIO4 (Cardputer EXT header G4) is driven HIGH during any
+     * dit/dah and LOW during spaces, mirroring the CW output of whichever
+     * keyer (iambic or straight) or the held `K` keyboard key.
+     *
+     * @return true if radio keying is enabled; default false.
+     */
+    bool radioKeyingEnabled() const;
+
+    /**
+     * setRadioKeyingEnabled — toggle the on-air keying output.
+     *
+     * @param enabled  true to enable, false to disable (force GPIO LOW).
+     *
+     * Off-to-on does NOT restore stale demand from any still-held key
+     * — a fresh element / key-press is required to key the transmitter.
+     * Persisted to NVS by main.cpp on Enter from KEYING_SETTINGS.
+     */
+    void setRadioKeyingEnabled(bool enabled);
 
     // ─── Decoded text (circular buffer) ────────────────────────────────────
     // The circular buffer holds TEXT_BUF_SIZE (200) characters of decoded morse.
@@ -485,6 +510,9 @@ private:
     std::atomic<int> _wpm{20};
     std::atomic<float> _frequency{600.0f};
     std::atomic<int> _volume{50};
+
+    // Radio keying output (default OFF for safety — must be user-enabled)
+    std::atomic<bool> _radioKeyingEnabled{false};
 
     // Keyer pattern percentage — written by audio thread
     std::atomic<int> _keyerPct{0};

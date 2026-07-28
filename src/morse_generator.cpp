@@ -7,6 +7,11 @@
 #endif
 #include <cmath>
 #include <cstring>
+// NOTE: MorseGenerator (player, e.g. P-key "Hello Morse!" playback) is
+// intentionally NOT wired to KeyEventBus in this change. The future
+// Winkey-compatible player will emit KeyEventBus::keyDown() / keyUp()
+// here at every dit/dah boundary so on-air transmissions can be
+// triggered by stored text. See docs/keyer.md §"Behavior".
 
 // ---------------------------------------------------------------------------
 // Constructor

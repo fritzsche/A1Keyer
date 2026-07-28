@@ -70,6 +70,10 @@ void CardputerDisplay::render() {
             updateStatusLine(model);
             showModeSettingsView(model);
             break;
+        case DisplayScreen::KEYING_SETTINGS:
+            updateStatusLine(model);
+            showKeyingSettingsView(model);
+            break;
         case DisplayScreen::DECODER:
         default:
             updateStatusLine(model);
@@ -277,6 +281,28 @@ void CardputerDisplay::showModeSettingsView(MorseModel& model) {
     M5.Display.setTextColor(0x7384);
     M5.Display.setCursor(0, MAIN_Y + 95);
     M5.Display.print(";/.: change   ENTER: confirm");
+}
+
+void CardputerDisplay::showKeyingSettingsView(MorseModel& model) {
+    M5.Display.setFont(nullptr);
+    M5.Display.setTextSize(2);
+    M5.Display.setTextColor(COLOR_FG);
+    M5.Display.setCursor(0, MAIN_Y + 4);
+    M5.Display.print("KEYING");
+
+    M5.Display.setFont(nullptr);
+    M5.Display.setTextSize(3);
+    // Use warning colour when ON so the user notices that GPIO4 will be
+    // driving a real transmitter.
+    M5.Display.setTextColor(model.radioKeyingEnabled() ? COLOR_WARN : COLOR_ACCENT);
+    M5.Display.setCursor(0, MAIN_Y + 28);
+    M5.Display.print(model.radioKeyingEnabled() ? "On" : "Off");
+
+    M5.Display.setFont(nullptr);
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(0x7384);
+    M5.Display.setCursor(0, MAIN_Y + 95);
+    M5.Display.print(";: On   .: Off   ENTER: confirm");
 }
 
 void CardputerDisplay::renderScrollingText(const char* text, size_t textLen, size_t maxVisible) {

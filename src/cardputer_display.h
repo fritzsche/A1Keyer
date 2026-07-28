@@ -262,6 +262,17 @@ public:
      */
     void showModeSettingsView(MorseModel& model) override;
 
+    /**
+     * showKeyingSettingsView — Radio keying settings (On/Off toggle).
+     *
+     * Shows: "KEYING" label (2x), large current value (3x), hint row.
+     * Adjusted with ; (On) / . (Off). Confirmed with Enter.
+     * 10s inactivity timeout is handled by DisplayTask via OVERLAY_TIMEOUT_MS.
+     *
+     * @param model  MorseModel reference.
+     */
+    void showKeyingSettingsView(MorseModel& model) override;
+
     // ─── Screen-saver control ────────────────────────────────────────────────
 
     /**

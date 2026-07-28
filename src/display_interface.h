@@ -47,6 +47,9 @@ public:
     /** Show the mode settings screen (in-place editing with Fn+;/Fn+.). */
     virtual void showModeSettingsView(MorseModel& model) = 0;
 
+    /** Show the radio-keying settings screen (On/Off toggle, ;/.). */
+    virtual void showKeyingSettingsView(MorseModel& model) = 0;
+
     /** Put display into low-power / sleep mode (screen-saver). */
     virtual void powerOff() = 0;
 

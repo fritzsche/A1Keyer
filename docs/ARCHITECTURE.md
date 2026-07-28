@@ -27,6 +27,7 @@ narrative.
 14. [Cross-core synchronisation](#14-cross-core-synchronisation)
 15. [Multi-device porting (Tab5 ↔ Cardputer ADV)](#15-multi-device-porting-tab5--cardputer-adv)
 16. [cmorse reference (extern/)](#16-cmorse-reference-extern)
+17. [Radio keying output (`keyer.md`)](keyer.md) — galvanically-isolated CW output on GPIO4 via a PC817 optocoupler; central `KeyEventBus` reference-counted dispatcher.
 
 ---
 

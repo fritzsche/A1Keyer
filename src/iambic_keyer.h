@@ -212,6 +212,12 @@ private:
     int _currentElement = IAMBIC_ELEMENT_NONE;
     int _elementSamplePos = 0;
     int _elementTotalSamples = 0;
+    int _elementKeyedSamples = 0;  ///< Number of samples within the element
+                                   ///  that are actively keyed (tone).
+                                   ///  DIT envelope: 1*ditLen; DAH envelope: 3*ditLen.
+                                   ///  The remainder of the envelope is trailing
+                                   ///  silence and must NOT keep the radio keyed.
+    bool _radioElementKeyed = false; ///< Latch so keyUp() fires once per element.
     const float* _currentEnv = nullptr;
     size_t _currentEnvSize = 0;
 

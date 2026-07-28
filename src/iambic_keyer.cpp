@@ -33,6 +33,7 @@
 #ifndef UNIT_TEST
 #include "morse_key.h"  // for PIN_KEY_DIT, PIN_KEY_DAH, gpio_get_level
 #endif
+#include "key_event_bus.h"
 
 KeyState s_keyState;
 
@@ -55,6 +56,8 @@ void IambicKeyer::begin(KeyEnvelop* env) {
     _currentElement = IAMBIC_ELEMENT_NONE;
     _elementSamplePos = 0;
     _elementTotalSamples = 0;
+    _elementKeyedSamples = 0;
+    _radioElementKeyed = false;
     _currentEnv = nullptr;
     _currentEnvSize = 0;
     _phase = 0.0f;
@@ -65,6 +68,9 @@ void IambicKeyer::begin(KeyEnvelop* env) {
     _interElementSilenceSamples = 0;
     _rbHead = 0;
     _rbTail = 0;
+    // Begin runs at startup; drain any stale bus demand in case a
+    // previous mode held the line HIGH.
+    KeyEventBus::forceAllUp();
 }
 
 /**
@@ -94,6 +100,7 @@ void IambicKeyer::startElement(int idx) {
     _currentElement = idx;
     _elementSamplePos = 0;
     _interElementSilenceSamples = 0;
+    _radioElementKeyed = false;  // fresh latch for this element
     if (_env && _env->wpm() != _wpm) {
         _wpm = _env->wpm();
     }
@@ -102,7 +109,13 @@ void IambicKeyer::startElement(int idx) {
         _currentEnv = _env->envelope(el);
         _currentEnvSize = _env->envelopeSize(el);
         _elementTotalSamples = static_cast<int>(_currentEnvSize);
+        // DIT envelope = 2*ditLen; keyed portion is 1*ditLen.
+        // DAH envelope = 4*ditLen; keyed portion is 3*ditLen.
+        int ditLen = _env->ditLengthSamples();
+        _elementKeyedSamples = (idx == DIT_IDX) ? ditLen : (3 * ditLen);
     }
+    // Notify the central bus that the radio line should go HIGH.
+    KeyEventBus::keyDown();
 }
 
 /**
@@ -224,6 +237,16 @@ size_t IambicKeyer::fillSamples(int16_t* mono, size_t frames,
         ++_elementSamplePos;
         ++_totalSamplesRendered;
         ++frameIdx;
+
+        // Release the radio line at the end of the keyed portion of the
+        // element (NOT at element boundary, which includes trailing
+        // silence that must NOT keep the transmitter keyed). Latched so
+        // it fires exactly once per element.
+        if (!_radioElementKeyed && _elementSamplePos >= _elementKeyedSamples &&
+            _elementKeyedSamples > 0) {
+            KeyEventBus::keyUp();
+            _radioElementKeyed = true;
+        }
 
         // --- Element boundary ---
         if (_elementSamplePos >= _elementTotalSamples) {

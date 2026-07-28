@@ -19,6 +19,8 @@
 #include "Log.h"
 #include "display_model.h"
 #include "display_task.h"
+#include "key_event_bus.h"
+#include "radio_keyer.h"
 #ifdef BOARD_CARDPUTER
 #include "cardputer_display.h"
 #endif
@@ -52,15 +54,23 @@ static void handleKeyboard() {
     }
 
     static bool wasW = false, wasF = false, wasP = false, wasV = false, wasM = false;
+    static bool wasK = false;
     static bool wasEnter = false, wasShift = false;
     static bool wasBtnA = false;
     static bool wasSemicolon = false, wasPeriod = false;
+    // K-hold-to-radio latches. kRadioActive tracks whether we currently
+    // own a KeyEventBus::keyDown() that needs a matching keyUp() on release.
+    // suppressKUntilRelease prevents a held K from immediately keying the
+    // radio right after the user closes the KEYING_SETTINGS overlay.
+    static bool kRadioActive = false;
+    static bool suppressKUntilRelease = false;
 
     bool wKey       = kb.isKeyPressed('W') || kb.isKeyPressed('w');
     bool fKey       = kb.isKeyPressed('F') || kb.isKeyPressed('f');
     bool pKey       = kb.isKeyPressed('P') || kb.isKeyPressed('p');
     bool vKey       = kb.isKeyPressed('V') || kb.isKeyPressed('v');
     bool mKey       = kb.isKeyPressed('M') || kb.isKeyPressed('m');
+    bool kKey       = kb.isKeyPressed('K') || kb.isKeyPressed('k');
     bool enter      = kb.isKeyPressed(KEY_ENTER);
     bool shift      = kb.keysState().shift;
     bool btnA       = M5Cardputer.BtnA.isPressed();
@@ -110,6 +120,27 @@ static void handleKeyboard() {
         } else {
             model.setScreen(DisplayScreen::MODE_SETTINGS);
             model.setOverlayStartMillis(millis());
+        }
+        DisplayTask::requestRender();
+    }
+
+    // K → keying settings (toggle On/Off radio output). Suppresses a
+    // single follow-up press for hold-to-key so opening the overlay
+    // with K cannot also key the radio.
+    if (kKey && !wasK) {
+        if (model.screen() == DisplayScreen::KEYING_SETTINGS) {
+            model.setScreen(DisplayScreen::DECODER);
+            suppressKUntilRelease = true;
+        } else {
+            model.setScreen(DisplayScreen::KEYING_SETTINGS);
+            model.setOverlayStartMillis(millis());
+            suppressKUntilRelease = true;
+        }
+        // If we owned a key-down (e.g. switching screens mid-key),
+        // release it so we don't leave the line HIGH.
+        if (kRadioActive) {
+            KeyEventBus::keyUp();
+            kRadioActive = false;
         }
         DisplayTask::requestRender();
     }
@@ -174,6 +205,37 @@ static void handleKeyboard() {
         MorseKey::clearMemory();
         if (auto sk = AudioEngine::straightKeyer()) sk->reset();
     }
+    // In KEYING settings: ; = On, . = Off
+    else if (model.screen() == DisplayScreen::KEYING_SETTINGS) {
+        if (semicolon && !wasSemicolon) { model.setRadioKeyingEnabled(true);  DisplayTask::requestRender(); }
+        if (period    && !wasPeriod)     { model.setRadioKeyingEnabled(false); DisplayTask::requestRender(); }
+        model.setOverlayStartMillis(millis());
+    }
+
+    // K hold-to-key (only when keying is enabled and we are NOT inside
+    // the KEYING_SETTINGS overlay, and not suppressed by a recent
+    // overlay open/close). We use the central KeyEventBus so iambic,
+    // straight key, and this keyboard K all key the radio symmetrically.
+    if (model.radioKeyingEnabled() &&
+        model.screen() != DisplayScreen::KEYING_SETTINGS &&
+        !suppressKUntilRelease) {
+        if (kKey && !kRadioActive) {
+            KeyEventBus::keyDown();
+            kRadioActive = true;
+        } else if (!kKey && kRadioActive) {
+            KeyEventBus::keyUp();
+            kRadioActive = false;
+        }
+    } else {
+        // If we entered the overlay / were suppressed / keying disabled
+        // while K was held, drop any owned key-down.
+        if (kRadioActive) {
+            KeyEventBus::keyUp();
+            kRadioActive = false;
+        }
+    }
+    // Clear suppression once the user releases K physically.
+    if (!kKey) suppressKUntilRelease = false;
 
     // Enter: dismiss overlay and return to DECODER. Save settings if in settings screens.
     if (enter && !wasEnter) {
@@ -205,6 +267,13 @@ static void handleKeyboard() {
             prefs.end();
             Serial.printf("[KB] saved keyerType=%s\n", model.keyerType() == KeyerType::PADDLE ? "paddle" : "straight");
         }
+        if (model.screen() == DisplayScreen::KEYING_SETTINGS) {
+            Preferences prefs;
+            prefs.begin("morse", false);  // read-write
+            prefs.putBool("keying", model.radioKeyingEnabled());
+            prefs.end();
+            Serial.printf("[KB] saved keying=%d\n", model.radioKeyingEnabled() ? 1 : 0);
+        }
         if (model.screen() != DisplayScreen::DECODER) {
             model.setScreen(DisplayScreen::DECODER);
             DisplayTask::requestRender();
@@ -221,7 +290,7 @@ static void handleKeyboard() {
     }
     wasBtnA = btnA;
 
-    wasW = wKey; wasF = fKey; wasV = vKey; wasM = mKey; wasShift = shift;
+    wasW = wKey; wasF = fKey; wasV = vKey; wasM = mKey; wasK = kKey; wasShift = shift;
     wasSemicolon = semicolon; wasPeriod = period;
 #else
     (void)0;
@@ -250,6 +319,11 @@ void setup() {
     }
     AudioEngine::createMorseGen();
 
+    // Radio keying output (Cardputer only). Subscribes to KeyEventBus.
+#ifdef BOARD_CARDPUTER
+    RadioKeyer::begin();
+#endif
+
     // Paddle key input (GPIO interrupts)
     MorseKey::begin();
 
@@ -272,13 +346,17 @@ void setup() {
         int savedFreq = prefs.getInt("freq", 600);
         int savedVol = prefs.getInt("vol", 50);
         String savedKeyType = prefs.getString("keytype", "paddle");
+        bool savedKeying = prefs.getBool("keying", false);
         prefs.end();
         model.setWPM(savedWpm);
         model.setFrequency((float)savedFreq);
         model.setVolume(savedVol);
         model.setKeyerType(savedKeyType == "straight" ? KeyerType::STRAIGHT : KeyerType::PADDLE);
-        Serial.printf("[setup] loaded WPM=%d freq=%d vol=%d keytype=%s from preferences\n",
-            savedWpm, savedFreq, savedVol, savedKeyType.c_str());
+        // Apply the persisted keying setting AFTER RadioKeyer::begin() so
+        // the GPIO is owned and ready. Default is Off (safe).
+        model.setRadioKeyingEnabled(savedKeying);
+        Serial.printf("[setup] loaded WPM=%d freq=%d vol=%d keytype=%s keying=%d from preferences\n",
+            savedWpm, savedFreq, savedVol, savedKeyType.c_str(), savedKeying ? 1 : 0);
     }
 
     Log::info("A1Keyer v%s", A1KEYER_VERSION);

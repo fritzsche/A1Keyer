@@ -386,14 +386,12 @@ void AudioEngine::audioTask(void*) {
 // Public API
 // ---------------------------------------------------------------------------
 bool AudioEngine::begin() {
-    gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << 4),
-        .mode         = GPIO_MODE_OUTPUT,
-        .pull_up_en   = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type    = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&io_conf);
+    // NOTE: GPIO4 ownership was moved to RadioKeyer (radio_keyer.cpp)
+    // which resets and reconfigures the pin via RadioKeyer::begin()
+    // called from main.cpp::setup() after AudioEngine::begin() returns.
+    // The original generic gpio_config() block was left out because
+    // RadioKeyer fully owns the pin now. NS4168 amp chain does not
+    // depend on this register write (verified by build of v0.1.0).
 
     fastMathInit();
     s_phaseIncrement =

@@ -1,6 +1,7 @@
 #include "display_model.h"
 #ifndef UNIT_TEST
 #include "audio_engine.h"
+#include "radio_keyer.h"
 #include <Arduino.h>
 #else
 #include "../test/mocks/arduino_mock.h"
@@ -36,6 +37,22 @@ KeyerType MorseModel::keyerType() const {
 
 void MorseModel::setKeyerType(KeyerType t) {
     _keyerType.store(t, std::memory_order_relaxed);
+    incrementChangeCounter();
+}
+
+bool MorseModel::radioKeyingEnabled() const {
+    return _radioKeyingEnabled.load(std::memory_order_relaxed);
+}
+
+void MorseModel::setRadioKeyingEnabled(bool enabled) {
+    bool prev = _radioKeyingEnabled.exchange(enabled, std::memory_order_relaxed);
+    if (prev == enabled) return;
+#ifndef UNIT_TEST
+    // Delegate physical side-effects to RadioKeyer so GPIO policy stays
+    // in one place. On disable this forces the line LOW even if a
+    // keyer is mid-element.
+    RadioKeyer::setEnabled(enabled);
+#endif
     incrementChangeCounter();
 }
 
