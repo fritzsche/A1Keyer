@@ -322,12 +322,12 @@ Listed in order of how likely each is to unblock.
    `platformio.ini` so the panic prints a C++ backtrace instead of
    just register state.
 
-## 8. RESOLVED — sdkconfig BLE pool shrink (two iterations)
+## 8. RESOLVED — sdkconfig BLE pool shrink (two iterations) + framework upgrade
 
-**Status: BLE bring-up is unblocked as of 2026-07-30, second iteration
-pending on-device verification.** The host should see `A1Keyer` after
-pressing `b`/`B`; the byte-level NUS round-trip should work in LightBlue
-/ macOS Bluetooth Explorer.
+**Status: BLE bring-up is unblocked as of 2026-07-30, framework
+upgraded to 3.3.11, pending on-device verification.** The host should
+see `A1Keyer` after pressing `b`/`B`; the byte-level NUS round-trip
+should work in LightBlue / macOS Bluetooth Explorer.
 
 ### Root cause
 
@@ -391,6 +391,36 @@ Total saved: ~39 KB of internal SRAM. The MSYS_1/MSYS_2 pools are
 the working general-purpose mbuf pools NimBLE hands out for GATT
 writes and notifications; 8 × 256 + 16 × 320 = 7 KB of working mbuf
 memory is plenty for one NUS peer.
+
+### Framework upgrade (3.3.5 → 3.3.11)
+
+In parallel with the override, the platform was pinned to pioarduino
+55.03.311 (platformio/platform-espressif32) which bundles arduino-esp32
+**3.3.11 / ESP-IDF 5.5.5**. The relevant upstream fixes between 3.3.5
+and 3.3.11 are:
+
+- **3.3.6** — "fix(ble): Fix BLE memory release" (#12192)
+- **3.3.7** — "fix(ble): Make BLE memory management automatic" (#12287)
+  — likely the real fix for the heap pressure we hit.
+- **3.3.9** — "feat(bt): Add BT memory tracking and wrapping" (#12574)
+- **3.3.11** — multiple BLE buffer-overflow fixes.
+
+Pin in `platformio.ini`:
+
+```ini
+[env:esp32s3_cardputer]
+platform = https://github.com/pioarduino/platform-espressif32.git#55.03.311
+```
+
+After upgrading, the build dropped **76 KB** in flash (934 KB → 858 KB)
+because the framework removed ~76 KB of code that was only needed for
+the old manual BLE memory management. RAM stayed flat (~13%).
+
+The sdkconfig override is **kept** as a safety net — even on 3.3.11,
+the smaller pool sizes don't hurt and they make the heap budget visible
+in the script. If the 3.3.7+#12287 fix really does make BLE memory
+management automatic, the override should be a no-op (the framework
+won't allocate what it doesn't need).
 
 The script:
 1. Locates the framework's pre-built `sdkconfig.h` for every ESP32-S3
