@@ -38,6 +38,30 @@ MorseGenerator* AudioEngine::s_morseGen      = nullptr;
 IambicKeyer*   AudioEngine::s_keyer        = nullptr;
 StraightKeyer* AudioEngine::s_straightKeyer = nullptr;
 int            AudioEngine::s_volumePercent   = DEFAULT_VOLUME_PERCENT;
+
+// ---------------------------------------------------------------------------
+// Shared keying envelope
+//
+// The DIT/DAH Blackman-Harris tables are large (~69 KB at 20 WPM/48 kHz:
+// 23 KB dit + 46 KB dah). This board (Cardputer ADV, ESP32-S3) has no
+// PSRAM, so a single shared instance is used by every consumer that needs
+// shaped envelopes — the iambic keyer and the morse generator. Both are
+// designed to take a KeyEnvelop* (see IambicKeyer::begin / MorseGenerator
+// ctor: "shared, must outlive"). Previously each held its own instance,
+// tripling the footprint to ~207 KB and starving the internal-SRAM heap so
+// badly that NimBLE's host mbuf pools could not be allocated
+// (esp_nimble_hci_init -> ESP_ERR_NO_MEM). WPM is a single global setting,
+// so sharing one envelope is also semantically correct — every consumer
+// keys at the same speed.
+//
+// StraightKeyer does NOT use a KeyEnvelop (it builds its own small ramp
+// tables via the static KeyEnvelop::build*Ramp helpers), so it is not a
+// consumer here.
+static KeyEnvelop& sharedEnvelope() {
+    static KeyEnvelop env(20, 0.005f, AUDIO_SAMPLE_RATE);  // 20 WPM, 5 ms ramp
+    return env;
+}
+
 // Cached linear amplitude — updated by setVolumePercent(), read by audio task.
 // Declared volatile so the compiler does not cache the value across the task boundary.
 volatile int16_t AudioEngine::s_cachedAmplitude = AUDIO_TONE_AMPLITUDE_MAX / 2;
@@ -445,15 +469,14 @@ bool AudioEngine::begin() {
     }
     ampEnable(true);
 
-    // Iambic keyer has its own KeyEnvelop (independent from MorseGenerator's)
-    static KeyEnvelop keyerEnv(20, 0.005f, AUDIO_SAMPLE_RATE);  // 20 WPM, 5ms ramp
+    // Iambic keyer keys through the single shared envelope (see
+    // sharedEnvelope() above). The morse generator shares the same one.
     s_keyer = new IambicKeyer();
-    s_keyer->begin(&keyerEnv);
+    s_keyer->begin(&sharedEnvelope());
     s_keyer->setWPM(20);
     Log::info("[AudioEngine] keyer created (WPM=%d)", s_volumePercent);
 
-    // Straight keyer has its own KeyEnvelop
-    static KeyEnvelop straightEnv(20, 0.005f, AUDIO_SAMPLE_RATE);
+    // Straight keyer builds its own small ramp tables — no KeyEnvelop.
     s_straightKeyer = new StraightKeyer();
     s_straightKeyer->begin();
     s_straightKeyer->setWPM(20);
@@ -542,8 +565,8 @@ void AudioEngine::setHeadphoneMode(bool hp) { (void)hp; }
 // ---------------------------------------------------------------------------
 void AudioEngine::createMorseGen() {
     if (s_morseGen) return;  // already exists
-    static KeyEnvelop env(20, 0.005f, AUDIO_SAMPLE_RATE);  // 20 WPM, 5ms ramp
-    s_morseGen = new MorseGenerator(&env, 20);
+    // Shares the single envelope with the iambic keyer (see sharedEnvelope()).
+    s_morseGen = new MorseGenerator(&sharedEnvelope(), 20);
 }
 
 void AudioEngine::deleteMorseGen() {
