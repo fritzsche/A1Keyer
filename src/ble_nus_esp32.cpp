@@ -44,6 +44,7 @@
 #include <NimBLEUtils.h>
 #include <NimBLECharacteristic.h>
 #include <NimBLEAdvertising.h>
+#include <esp_heap_caps.h>
 #include <string.h>
 
 // ---------------------------------------------------------------------------
@@ -172,9 +173,28 @@ bool BleNus::begin(const char* deviceName) {
     // It also wires up the framework's NimBLE HCI callbacks, so the
     // framework's BLEDevice::init() chain (which would conflict on
     // this combo) never runs.
-    NimBLEDevice::init(_deviceName);
+    //
+    // init() returns false when the BT controller or NimBLE host fails
+    // to come up. On this no-PSRAM board the usual failure is the host
+    // mbuf pools failing to allocate (esp_nimble_hci_init ->
+    // ESP_ERR_NO_MEM) because internal SRAM is exhausted. We MUST check
+    // the return: NimBLE-Arduino logs the error but still lets us call
+    // createServer()/createService() on a dead stack, which then only
+    // fails much later at "Host not synced" — masking the real cause.
+    if (!NimBLEDevice::init(_deviceName)) {
+        Log::error("[BLE] NimBLEDevice::init failed — largest free "
+                   "internal block=%u B, free internal=%u B",
+                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+        // Release whatever the controller did bring up so a later retry
+        // starts from a clean slate rather than ESP_ERR_INVALID_STATE.
+        NimBLEDevice::deinit(true);
+        ble_nus_internal::setState(State::Error);
+        return false;
+    }
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);  // +9 dBm — Cardputer ADV antenna is fine
-    Log::info("[BLE] NimBLEDevice::init OK");
+    Log::info("[BLE] NimBLEDevice::init OK (free internal=%u B)",
+              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 
     // Create the server and register our callbacks.
     _pServer = NimBLEDevice::createServer();

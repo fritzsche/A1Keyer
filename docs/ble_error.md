@@ -546,6 +546,73 @@ The on-device code (`src/ble_nus_esp32.cpp`, `src/ble_nus.cpp`,
 `src/ble_nus.h`) is unchanged from the NimBLE-Arduino rewrite. The
 architecture was correct; the runtime was starved of heap.
 
+## 8b. ACTUAL ROOT CAUSE — three redundant KeyEnvelop instances (2026-07-30)
+
+**Status: fixed in firmware. The pool-shrink theory in §8 was treating a
+symptom.** On-device serial log finally captured the number that ends the
+guessing:
+
+```
+INTERNAL Memory Info:      (printed by After-Setup, BEFORE pressing B)
+  Free Bytes        :    45956 B ( 44.9 KB)
+  Largest Free Block:    31732 B ( 31.0 KB)
+```
+
+NimBLE's host mbuf pools are allocated as individual `calloc`s, each of
+which needs one *contiguous* block. Even with §8's shrunk pools, the
+largest single pool alloc is bigger than the 31 KB largest free block, so
+`esp_nimble_hci_init()` returns `ESP_ERR_NO_MEM` (257). Shrinking pools
+never won because it was fighting for scraps of a heap that was already
+~87% consumed at boot.
+
+**What actually consumed the SRAM:** the `KeyEnvelop` DIT/DAH tables are
+`float` arrays. At 20 WPM / 48 kHz each instance holds dit (5760 floats =
+23 KB) + dah (11520 floats = 46 KB) = **~69 KB**. `audio_engine.cpp`
+created **three** instances:
+
+1. `keyerEnv`   — used by the iambic keyer.
+2. `straightEnv` — **never used** (StraightKeyer builds its own small
+   ramp tables via the static `KeyEnvelop::build*Ramp` helpers).
+3. `env`        — used by the morse generator.
+
+That is ~207 KB of the 283 KB allocated-at-boot total, for tables that
+are identical (same WPM, same ramp, same sample rate).
+
+**The fix** (no pool changes, no framework change, no transport change):
+
+- `audio_engine.cpp` now has one file-scope `sharedEnvelope()`
+  function-local static `KeyEnvelop`, shared by the iambic keyer and the
+  morse generator (both already took a `KeyEnvelop*` documented as
+  "shared, must outlive" — the three-instance version was an
+  implementation slip).
+- The unused `straightEnv` is deleted outright.
+- Net: ~207 KB → ~69 KB, freeing **~138 KB** of internal SRAM. That is
+  ~3–4× NimBLE's whole footprint, so the host pools now allocate with
+  wide margin.
+
+Also fixed: `ble_nus_esp32.cpp` ignored `NimBLEDevice::init()`'s `bool`
+return and printed "init OK" on a dead stack, so a NO_MEM failure only
+surfaced later as "Host not synced". It now checks the return, logs
+`heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)` on failure,
+calls `NimBLEDevice::deinit(true)` to leave a clean slate, and bails to
+`State::Error`.
+
+The §8 sdkconfig pool-shrink override is kept as a harmless safety net.
+
+**On-device verification (pending):** after re-flash, the
+`[BLE] NimBLEDevice::init OK (free internal=NNN B)` line should print a
+comfortable free figure, `A1Keyer` should appear in the host's Bluetooth
+scan, and the NUS round-trip should work. If it still fails, the new
+error line prints the exact largest-free-block so there is no more
+guessing.
+
+> Note on the end goal: BLE NUS is **not** an OS-level virtual serial
+> port (COM / `/dev/tty`) on Windows/macOS/Linux — it needs a companion
+> app to speak NUS. The Cardputer's native USB (CDC-on-boot, already
+> enabled) *does* enumerate as a real COM port for ~0 KB SRAM and is the
+> better transport for desktop WinKeyer host software. BLE is kept for
+> phone/tablet clients; see the transport discussion for the split.
+
 ## 9. References
 
 - `~/.platformio/packages/framework-arduinoespressif32/libraries/BLE/src/BLEDevice.cpp` —
