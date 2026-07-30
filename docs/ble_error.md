@@ -606,6 +606,126 @@ scan, and the NUS round-trip should work. If it still fails, the new
 error line prints the exact largest-free-block so there is no more
 guessing.
 
+## 8c. macOS invisibility — static random address from eFuse MAC (2026-07-30)
+
+**Status: fixed in firmware.** After the §8b memory fix, init succeeds
+and Windows shows `A1Keyer` immediately. macOS System Settings →
+Bluetooth shows nothing. This is not a firmware bug — it is a macOS
+quirk around how it treats random BLE addresses.
+
+### Why
+
+`NimBLEDevice.cpp:102` defaults `m_ownAddrType` to `BLE_OWN_ADDR_PUBLIC`.
+Inside `NimBLEDevice::init()` (line 851) the library checks whether the
+controller actually has a public address burned into eFuse; the Cardputer
+ADV (and most ESP32-S3 modules) does **not**, so NimBLE silently falls
+back to `BLE_OWN_ADDR_RANDOM` — and on each reboot, a fresh random
+address is generated.
+
+- **Windows** treats every random-resolvable ADV report as a distinct
+  "other device" in the Devices list — so the Cardputer shows up
+  immediately under a name like `A1Keyer` (the local name is in the
+  payload, the MAC is hidden by the UI).
+- **macOS** aggressively filters random-resolvable addresses out of the
+  visible device list until the device is paired. LightBlue /
+  Bluetooth Explorer see it (they are scanners, not the Settings pane);
+  System Settings → Bluetooth does not.
+
+This is a privacy feature, not a defect: a peripheral whose address
+changes every boot looks exactly like a tracker beacon to the macOS
+Bluetooth stack, and the stack silently drops it from the Settings list.
+
+### Fix — must be set BEFORE `NimBLEDevice::init()`, not after
+
+`src/ble_nus_esp32.cpp:174-217` derives a **Static Random Address** from
+the eFuse factory MAC and writes it into the BT interface's RAM mirror
+**before** the controller is initialised:
+
+```cpp
+uint8_t mac[6];
+esp_efuse_mac_get_default(mac);          // factory-programmed, unique per chip
+mac[5] |= 0xC0;                          // top two bits = 11 → marks it as a
+                                         // Static Random Address per BT spec
+NimBLEAddress staticAddr(mac, BLE_ADDR_RANDOM);
+esp_err_t r = esp_iface_mac_addr_set(mac, ESP_MAC_BT);
+if (r != ESP_OK) { /* fall back to NRPA — macOS will hide us again */ }
+
+if (!NimBLEDevice::init(_deviceName)) { … }
+```
+
+When `NimBLEDevice::init()` later runs, it calls `esp_bt_controller_init()`
+internally; the controller now reads the MAC we just installed instead
+of generating its own NRPA on the fly. NimBLE's default
+`BLE_OWN_ADDR_PUBLIC` then matches what the controller transmits on
+the air, and macOS treats the address as a stable identity.
+
+### Why this is *before* the init call (and not after, as one would expect)
+
+The earlier version called `NimBLEDevice::setOwnAddrType()` /
+`NimBLEDevice::setOwnAddr()` *after* `init()` — but on ESP32-S3 this
+does **not** propagate to the controller. The BT controller reads its
+own MAC from internal storage during `esp_bt_controller_init()`, and
+once that has happened, the post-init host-level `ble_hs_id_set_rnd()`
+HCI command either fails or is silently ignored by the controller. The
+host's identity record updates, but the controller keeps using
+whatever NRPA it generated. The serial log even shows our static-random
+address, because `NimBLEAddress::toString()` reads from the host
+identity — which is not what is on the air.
+
+Source: NimBLE-Arduino issue #430 —
+
+> "you cannot change the base MAC, which is the one used by the BT
+> interface, whilst any networking is initialized. As I see it, you
+> have two options: 1) Either shut down and de-init all networking,
+> or 2) Restart."
+
+`esp_iface_mac_addr_set()` is RAM-only for the specific interface, so
+it does not touch eFuse and the change survives only until the next
+power-cycle — exactly the lifetime we want for a stable per-boot
+identity.
+
+### Why not post-init `setOwnAddr()` + a `deinit()`/`init()` round-trip?
+
+Possible, but slow (BT stack teardown on a no-PSRAM board has measurable
+RAM peaks) and pointless, since `esp_iface_mac_addr_set()` already puts
+the address where the controller reads it on first init.
+
+### Why not just burn a public address into eFuse?
+
+`espefuse.py --port ... set-bt-address <MAC>` and a one-time
+`burn-bt-address` write would also work, and would make NimBLE use
+`BLE_OWN_ADDR_PUBLIC`. We chose the software path because:
+
+1. The eFuse write is permanent and one-way — bad for dev iteration
+   where the address is occasionally useful as a debug identifier.
+2. The factory MAC is already unique per chip and stable, so the
+   derived Static Random Address is equally stable.
+3. macOS treats a Static Random Address (top-2-bits `11`) the same as
+   a Public Address for the Settings pane — both are stable identities
+   the OS can remember across reboots.
+
+### Verification
+
+After re-flash, the serial log shows the derived address:
+
+```
+[BLE] BLE addr=XX:XX:XX:XX:XX:XX (static-random, derived from eFuse MAC)
+[BLE] NimBLEDevice::init OK (free internal=NNNNN B)
+[BLE] initialised as 'A1Keyer'
+```
+
+The `XX:XX:XX:XX:XX:XX` is the chip's eFuse factory MAC with the top
+two bits of the last byte forced to `1` (so the address ends in
+`6X`/`EX`/`AX`/etc., not `0X`/`2X`/`4X`/etc. — that bit-pattern is the
+BT-spec marker for static-random).
+
+To confirm the controller is actually using this address (not a
+different NRPA picked up on its own), scan with **LightBlue** (or
+**nRF Connect**). The advertised address must read exactly the same
+`XX:XX:XX:XX:XX:XX`. Once the air matches the log, macOS System
+Settings → Bluetooth → `A1Keyer` populates after one press of `b`/`B`,
+exactly as Windows already did.
+
 > Note on the end goal: BLE NUS is **not** an OS-level virtual serial
 > port (COM / `/dev/tty`) on Windows/macOS/Linux — it needs a companion
 > app to speak NUS. The Cardputer's native USB (CDC-on-boot, already
