@@ -38,6 +38,7 @@ foreach(SUITE IN ITEMS
     test_morse_generator
     test_iambic_keyer
     test_morse_decoder
+    test_straight_keyer
     test_display_model
     test_key_event_bus
     test_radio_keyer
