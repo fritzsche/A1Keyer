@@ -733,66 +733,65 @@ exactly as Windows already did.
 > better transport for desktop WinKeyer host software. BLE is kept for
 > phone/tablet clients; see the transport discussion for the split.
 
-## 8d. FIXED — advertising call-order bug: name never reached scan response (2026-08-02)
+## 8d. FIXED — advertising packet layout: name must be in primary ADV_IND (2026-08-02)
 
-**Status: fixed in `src/ble_nus_esp32.cpp`.** A second macOS/Linux
-invisibility bug was found alongside the §8c address fix: even with a
-stable static-random address, the device name "A1Keyer" was placed in
-the wrong advertising packet, causing macOS and Linux/BlueZ to miss it.
+**Status: fixed in `src/ble_nus_esp32.cpp`.**
+
+### Symptom
+
+After the §8c static-random address fix, Windows showed the device as
+"Unknown Device" and macOS remained invisible.
 
 ### Root cause
 
-NimBLE-Arduino 2.x's `NimBLEAdvertising::setName()` checks the
-`m_scanResp` flag **at call time**. When `false`, the name goes into
-`m_advData` (the primary ADV_IND packet); when `true`, it goes into
-`m_scanData` (the scan response). The old call order was:
+The previous advertising setup (added during the §8c work) put the
+device name in the **scan response** and the NUS UUID in the primary
+ADV_IND packet:
 
 ```cpp
-adv->addServiceUUID(kNusServiceUuid);  // m_scanResp = false here
-adv->setName(_deviceName);             // → primary ADV_IND packet (wrong)
-adv->enableScanResponse(true);         // too late — m_scanData still empty
+adv->enableScanResponse(true);
+adv->addServiceUUID(kNusServiceUuid);  // → primary
+adv->setName(_deviceName);            // → scan response (m_scanResp=true)
 ```
 
-With `m_scanData` empty, NimBLE never transmits a scan response PDU
-(`start()` guards: `if (m_scanResp && m_scanData.getPayload().size() > 0)`).
-macOS and BlueZ issue a `SCAN_REQ` for every connectable undirected
-(`ADV_IND`) peripheral and resolve the device name from the scan
-response — if it is absent, the device is silently discarded from the
-Settings/scan list. Windows reads the name from either packet, so it
-worked there regardless.
+Windows resolves the display name from AD type 0x09 (Complete Local
+Name) in the **primary ADV_IND** packet. It does not always issue a
+`SCAN_REQ` before caching the display name, so with the name only in
+the scan response it showed "Unknown Device". macOS issues `SCAN_REQ`
+but its System Settings pane requires the name in the primary packet for
+the initial display — without it the device was invisible there too.
 
 ### Fix
 
-`enableScanResponse(true)` moved before `addServiceUUID` and `setName`,
-and an explicit 100 ms advertising interval added:
+Name goes in the primary ADV_IND packet; UUID goes in the scan response:
 
 ```cpp
 NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
-adv->enableScanResponse(true);        // must be first — routes name to scan response
-adv->addServiceUUID(kNusServiceUuid); // → primary ADV_IND (21 B total, ≤31 ✓)
-adv->setName(_deviceName);           // → scan response (9 B, ≤31 ✓)
-adv->setAdvertisingInterval(160);    // 160 × 0.625 ms = 100 ms
+adv->enableScanResponse(true);
+adv->setName(_deviceName);             // → primary ADV_IND (AD 0x09)
+adv->addServiceUUID(kNusServiceUuid);  // → scan response (overflow fallback)
+adv->setAdvertisingInterval(160);      // 100 ms
 ```
 
-The `setAdvertisingInterval(160)` call addresses a related macOS issue:
-the NimBLE default of `itvl=0` lets the ESP-IDF controller choose the
-interval, which on ESP-IDF 5.x can be 1.28 s — long enough for macOS's
-scan window to miss the device entirely.
+`addServiceUUID` tries the primary packet first; with name (9 B) +
+flags (3 B) = 12 B already there, the 128-bit UUID (18 B) still fits
+(total 30 B ≤ 31 B). Routing it to the scan response via overflow keeps
+the primary packet lean.
 
 ### Resulting packet layout
 
 | Packet | Contents | Size |
 |---|---|---|
-| Primary ADV_IND | Flags (3 B) + 128-bit NUS UUID (18 B) | 21 B |
-| Scan response | "A1Keyer" name (9 B) | 9 B |
+| Primary ADV_IND | Flags (3 B) + "A1Keyer" name (9 B) | 12 B |
+| Scan response | 128-bit NUS UUID (18 B) | 18 B |
 
 ### OS compatibility
 
-| OS | Discovery mechanism | Result |
-|---|---|---|
-| macOS | `SCAN_REQ` → name from scan response | visible ✓ |
-| Windows | name from either packet | visible ✓ |
-| Linux / BlueZ | `SCAN_REQ` → name from scan response | visible ✓ |
+| OS | Name resolution | UUID discovery | Result |
+|---|---|---|---|
+| macOS | AD 0x09 in primary ADV_IND | scan response | visible ✓ |
+| Windows | AD 0x09 in primary ADV_IND | scan response | "A1Keyer" ✓ |
+| Linux / BlueZ | AD 0x09 in primary ADV_IND | scan response | visible ✓ |
 
 ## 9. References
 

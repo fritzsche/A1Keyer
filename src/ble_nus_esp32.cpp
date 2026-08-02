@@ -288,31 +288,36 @@ bool BleNus::begin(const char* deviceName) {
     // service becomes visible to scanners once startAdvertising() runs.
     Log::info("[BLE] NUS service registered");
 
-    // Build advertising. We expose the service UUID in the primary ADV_IND
-    // packet and the device name in the scan response.
+    // Build advertising.
     //
-    // Call order matters for NimBLE-Arduino 2.x:
-    //   enableScanResponse(true) MUST come before setName().
-    //   NimBLEAdvertising::setName() checks m_scanResp at call time; if
-    //   true it stores the name in m_scanData (scan response), otherwise
-    //   it lands in m_advData (primary ADV_IND). With the name in the
-    //   primary packet m_scanData stays empty — the scan response is then
-    //   never sent, and macOS (which issues SCAN_REQ for connectable
-    //   ADV_IND peripherals and reads the name from the response) never
-    //   sees the device name.  Windows is more lenient; Linux/BlueZ is
-    //   not.
+    // Packet layout (both packets together ≤ 31 B each):
+    //   Primary ADV_IND : Flags (3 B) + device name "A1Keyer" (9 B) = 12 B
+    //   Scan response   : 128-bit NUS UUID (18 B)                   = 18 B
     //
-    // Packet budget after the fix:
-    //   Primary  (ADV_IND): 3 B flags + 18 B 128-bit UUID  = 21 B (≤31 ✓)
-    //   Scan response:       9 B "A1Keyer" name             =  9 B (≤31 ✓)
+    // Why name in primary, UUID in scan response:
+    //   - Windows resolves the display name from the primary ADV_IND packet
+    //     (AD type 0x09 Complete Local Name). Moving the name to the scan
+    //     response caused "Unknown Device" on Windows because Windows does
+    //     not always issue SCAN_REQ before showing a device name.
+    //   - macOS issues SCAN_REQ for connectable ADV_IND peripherals, so it
+    //     reads both packets. It shows the device name from AD type 0x08/0x09
+    //     in whichever packet contains it, and filters by service UUID from
+    //     the scan response.
+    //   - Linux/BlueZ behaves like macOS.
+    //
+    // enableScanResponse(true) must be called before addServiceUUID so that
+    // NimBLE-Arduino 2.x routes the UUID into m_scanData when it overflows
+    // m_advData. With name (9 B) + flags (3 B) = 12 B already in the primary
+    // packet, the 128-bit UUID (18 B) fits there too (total 30 B ≤ 31 B) —
+    // but putting it in the scan response keeps the primary packet small and
+    // leaves room for future additions.
     NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
-    adv->enableScanResponse(true);           // must be first — see above
-    adv->addServiceUUID(kNusServiceUuid);    // → primary ADV_IND packet
-    adv->setName(_deviceName);              // → scan response (m_scanResp=true)
-    // 160 × 0.625 ms = 100 ms advertising interval.  The NimBLE default
+    adv->enableScanResponse(true);
+    adv->setName(_deviceName);              // → primary ADV_IND (AD 0x09)
+    adv->addServiceUUID(kNusServiceUuid);   // → scan response (overflow fallback)
+    // 160 × 0.625 ms = 100 ms advertising interval. The NimBLE default
     // (itvl=0 → controller-chosen, often 1.28 s on ESP-IDF 5.x) is too
-    // slow for macOS's BLE scanner and can cause the device to be missed
-    // entirely in a normal scan window.
+    // slow for macOS's BLE scanner and can cause the device to be missed.
     adv->setAdvertisingInterval(160);
 
     _initialised = true;
