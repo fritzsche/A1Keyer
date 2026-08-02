@@ -1,0 +1,99 @@
+/**
+ * winkey.cpp — device-side WinKeyer facade (glue).
+ *
+ * Device build: wires WinkeyBridge callbacks to MorseModel / AudioEngine
+ * / MorseGenerator, streams the bridge's output bytes back over CDC1,
+ * and pumps received bytes in poll(). Host (UNIT_TEST) build: no-op.
+ */
+#include "winkey.h"
+
+#ifndef UNIT_TEST
+
+#include "winkey_bridge.h"
+#include "winkey_serial.h"
+#include "display_model.h"
+#include "audio_engine.h"
+#include "morse_generator.h"
+#include "Log.h"
+
+namespace {
+
+WinkeyBridge _bridge;
+
+// ─── Bridge output sink: bytes toward the host go out on CDC1. ──────────
+void wkOut(uint8_t byte, void* /*ctx*/) {
+    WinkeySerial::write(byte);
+}
+
+// ─── Effect callbacks (WinkeyBridge::Callbacks) ─────────────────────────
+void cbSetWpm(int wpm, void* /*ctx*/) {
+    // MorseModel::setWPM clamps to [5,50] and propagates to keyer + gen.
+    MorseModel::instance().setWPM(wpm);
+}
+
+void cbSetSidetoneHz(int hz, void* /*ctx*/) {
+    // MorseModel clamps to [300,900]; keep the model and audio in sync.
+    MorseModel::instance().setFrequency((float)hz);
+    AudioEngine::setToneFrequency((float)hz);
+}
+
+void cbSetOutputEnable(bool on, void* /*ctx*/) {
+    // Gated by the operator's KEYING setting inside RadioKeyer — see
+    // docs/winkey.md § 16.4 rule 3. We surface the host's intent by
+    // mirroring it into the model; RadioKeyer AND-s it with the operator
+    // flag, so a host E1 cannot re-enable RF the operator turned off.
+    MorseModel::instance().setRadioKeyingEnabled(on);
+}
+
+void cbSendText(const char* text, void* /*ctx*/) {
+    MorseGenerator* gen = AudioEngine::morseGen();
+    if (gen) {
+        MorseModel::instance().setMode(KeyerMode::ENCODER);
+        gen->playText(text);
+    }
+    // WK2 echoes each sent character back to the host. The chip does this
+    // as each char is keyed; we approximate by echoing the chunk now
+    // (loggers use the echo to track send progress, not exact timing).
+    for (const char* p = text; *p; ++p) {
+        WinkeySerial::write((uint8_t)*p);
+    }
+}
+
+void cbStopSending(void* /*ctx*/) {
+    MorseGenerator* gen = AudioEngine::morseGen();
+    if (gen) gen->stop();
+}
+
+}  // namespace
+
+void Winkey::begin() {
+    WinkeySerial::begin();
+    WinkeyBridge::Callbacks cb;
+    cb.setWpm          = &cbSetWpm;
+    cb.setSidetoneHz   = &cbSetSidetoneHz;
+    cb.setOutputEnable = &cbSetOutputEnable;
+    cb.sendText        = &cbSendText;
+    cb.stopSending     = &cbStopSending;
+    cb.ctx             = nullptr;
+    _bridge.begin(&wkOut, nullptr, cb);
+    Log::info("[WK] WinkeyBridge ready on CDC1");
+}
+
+void Winkey::poll() {
+    // Drain everything CDC1 has buffered this cycle, then run bridge
+    // housekeeping (buffer playback).
+    int guard = 256;  // bound work per loop() so we never starve the loop
+    while (WinkeySerial::available() > 0 && guard-- > 0) {
+        int b = WinkeySerial::read();
+        if (b < 0) break;
+        _bridge.feed((uint8_t)b);
+    }
+    _bridge.poll();
+}
+
+#else  // UNIT_TEST — no-op stubs
+
+void Winkey::begin() {}
+void Winkey::poll() {}
+
+#endif  // UNIT_TEST

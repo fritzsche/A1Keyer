@@ -48,11 +48,9 @@ int            AudioEngine::s_volumePercent   = DEFAULT_VOLUME_PERCENT;
 // shaped envelopes — the iambic keyer and the morse generator. Both are
 // designed to take a KeyEnvelop* (see IambicKeyer::begin / MorseGenerator
 // ctor: "shared, must outlive"). Previously each held its own instance,
-// tripling the footprint to ~207 KB and starving the internal-SRAM heap so
-// badly that NimBLE's host mbuf pools could not be allocated
-// (esp_nimble_hci_init -> ESP_ERR_NO_MEM). WPM is a single global setting,
-// so sharing one envelope is also semantically correct — every consumer
-// keys at the same speed.
+// tripling the footprint to ~207 KB and starving the internal-SRAM heap.
+// WPM is a single global setting, so sharing one envelope is also
+// semantically correct — every consumer keys at the same speed.
 //
 // StraightKeyer does NOT use a KeyEnvelop (it builds its own small ramp
 // tables via the static KeyEnvelop::build*Ramp helpers), so it is not a

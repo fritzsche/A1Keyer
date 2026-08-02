@@ -21,7 +21,7 @@
 #include "display_task.h"
 #include "key_event_bus.h"
 #include "radio_keyer.h"
-#include "ble_nus.h"
+#include "winkey.h"
 #ifdef BOARD_CARDPUTER
 #include "cardputer_display.h"
 #endif
@@ -56,7 +56,6 @@ static void handleKeyboard() {
 
     static bool wasW = false, wasF = false, wasP = false, wasV = false, wasM = false;
     static bool wasK = false;
-    static bool wasB = false;
     static bool wasEnter = false, wasShift = false;
     static bool wasBtnA = false;
     static bool wasSemicolon = false, wasPeriod = false;
@@ -74,7 +73,6 @@ static void handleKeyboard() {
     bool mKey       = kb.isKeyPressed('M') || kb.isKeyPressed('m');
     bool kKey       = kb.isKeyPressed('K') || kb.isKeyPressed('k');
     bool enter      = kb.isKeyPressed(KEY_ENTER);
-    bool bKey       = kb.isKeyPressed('B') || kb.isKeyPressed('b');
     bool shift      = kb.keysState().shift;
     bool btnA       = M5Cardputer.BtnA.isPressed();
     bool semicolon  = kb.isKeyPressed(';');
@@ -126,86 +124,6 @@ static void handleKeyboard() {
         }
         DisplayTask::requestRender();
     }
-
-    // B → toggle BLE advertising (Off → Advertising → Connected → Off).
-    // The first press brings the BLE stack up and starts advertising;
-    // the second press stops advertising (and drops any current link).
-    // This is the connectivity-test step: confirm a Mac can find
-    // "A1Keyer", pair, and round-trip bytes before any Winkeyer
-    // protocol lands on top of this transport.
-    //
-    // The Cardputer ADV's TCA8418 keyboard has been observed to
-    // re-emit rapid press/release edges on a held key (anti-ghosting
-    // scan), which would cause the toggle to flip ON-OFF-ON-OFF in
-    // a few ms and never reach a stable Advertising state.
-    //
-    //   kBKeyLockoutMs  — after every successful toggle, no other
-    //                     toggle is honoured for this many ms. Lets
-    //                     Mac/iOS/Windows scanners actually see the
-    //                     advert before the user (or auto-repeat)
-    //                     could disable it again.
-    //   bFirstPress     — the lockout uses elapsed time since the last
-    //                     trigger; on first boot lastBTriggerMillis=0
-    //                     so the elapsed time equals uptime (~5 s) which
-    //                     is less than kBKeyLockoutMs and would suppress
-    //                     the very first press. bFirstPress bypasses the
-    //                     time check on the first edge only.
-    //   wasB=true early — NimBLEDevice::init() inside startAdvertising()
-    //                     blocks for ~3 s. loop() is frozen during that
-    //                     time so wasB never updates. When loop() resumes,
-    //                     M5.update() sees the key still held and bKey=true
-    //                     with wasB=false — a spurious second edge that
-    //                     immediately stops advertising. Setting wasB=true
-    //                     before the blocking call prevents this.
-    static uint32_t lastBTriggerMillis = 0;
-    static bool     bFirstPress        = true;
-    constexpr uint32_t kBKeyLockoutMs  = 6000;
-    if (bKey && !wasB) {
-        uint32_t nowMs = millis();
-        bool allowed = bFirstPress ||
-                       (nowMs - lastBTriggerMillis > kBKeyLockoutMs);
-        if (allowed) {
-            bFirstPress        = false;
-            lastBTriggerMillis = nowMs;
-            wasB               = true;  // suppress the spurious edge after blocking init
-            Serial.printf("[KB] B pressed: state was %s\n",
-                BleNus::state() == BleNus::State::Off ? "Off" :
-                BleNus::state() == BleNus::State::Advertising ? "Advertising" :
-                BleNus::state() == BleNus::State::Connected ? "Connected" :
-                BleNus::state() == BleNus::State::Error ? "Error" : "?");
-            Serial.flush();
-            switch (BleNus::state()) {
-                case BleNus::State::Off:
-                    Serial.println("[KB] -> startAdvertising");
-                    Serial.flush();
-                    BleNus::startAdvertising();
-                    break;
-                case BleNus::State::Advertising:
-                case BleNus::State::Connected:
-                    Serial.println("[KB] -> stopAdvertising");
-                    Serial.flush();
-                    BleNus::stopAdvertising();
-                    break;
-                case BleNus::State::Error:
-                    Serial.println("[KB] -> recover (stop+start)");
-                    Serial.flush();
-                    BleNus::stopAdvertising();
-                    BleNus::startAdvertising();
-                    break;
-            }
-            Serial.printf("[KB] state now %s\n",
-                BleNus::state() == BleNus::State::Off ? "Off" :
-                BleNus::state() == BleNus::State::Advertising ? "Advertising" :
-                BleNus::state() == BleNus::State::Connected ? "Connected" :
-                BleNus::state() == BleNus::State::Error ? "Error" : "?");
-            Serial.flush();
-            DisplayTask::requestRender();
-        } else {
-            // Quietly suppress presses inside the lockout window
-            // — do not even emit the B-pressed line.
-        }
-    }
-    wasB = bKey;
 
     // K → keying settings (toggle On/Off radio output). Suppresses a
     // single follow-up press for hold-to-key so opening the overlay
@@ -402,6 +320,11 @@ void setup() {
     }
     AudioEngine::createMorseGen();
 
+    // WinKeyer 2.x emulation on USB CDC1 (second serial port). Host
+    // loggers (e.g. RUMlogNG) drive keying over this port while CDC0
+    // stays free for upload + monitor + logs. See docs/winkey.md.
+    Winkey::begin();
+
     // Radio keying output (Cardputer only). Subscribes to KeyEventBus.
 #ifdef BOARD_CARDPUTER
     RadioKeyer::begin();
@@ -449,6 +372,9 @@ void setup() {
 void loop() {
     M5.update();
     handleKeyboard();
+
+    // Service the WinKeyer USB CDC1 stream (host logger → keying).
+    Winkey::poll();
 
 #ifdef BOARD_CARDPUTER
     // Update headphone state

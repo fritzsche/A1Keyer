@@ -4,13 +4,20 @@ The K1EL WK2 serial protocol as implemented by the A1Keyer `WinkeyBridge`.
 Canonical reference for the host side, the firmware side, and the test
 harness.
 
-> **Status.** The status-byte bit map (§ 12), host-open sequence
-> (§ 5), and admin command set (§ 6) are cross-checked against the
-> K1EL WK2 datasheet v23 (October 2010). Operating-command byte codes
-> (§ 7-11) follow the K3NG convention. Values that remain to be
-> confirmed against the hamlib `winkey.c` source on a follow-up
-> revision are tagged `[unverified]` or `[verify]`. The A1Keyer
-> architecture in § 16 references verified source lines.
+> **Status.** The command byte codes and the command-vs-text model in
+> this document were CORRECTED on 2026-08-03 against the K3NG reference
+> implementation (`k3ng_cw_keyer/k3ng_keyer/k3ng_keyer.ino`,
+> `service_winkey()`), read directly from source. An earlier revision of
+> this file used **fabricated ASCII-letter command codes** (`'S'`=speed,
+> `'A'`=sidetone, `'L'`/`'P'` load/play) attributed to a non-existent
+> "K3NG convention" — those were wrong and are replaced below.
+>
+> **The real protocol:** command bytes are **0x00–0x1F**; bytes **≥ 0x20
+> are text sent as CW immediately** (§ 4.3, § 7). The version byte on
+> host-open is a revision number (**0x17** = WK2 rev 2.3); hosts accept
+> ≥ 0x10 as "a WinKeyer". Some parameter encodings (sidetone presets,
+> mode/pinconfig bit-fields, load-defaults) still warrant a pass against
+> the K1EL WK2 datasheet v23 and are tagged `[verify]`.
 
 ---
 
@@ -22,13 +29,13 @@ harness.
 4. [Physical and transport layer](#4-physical-and-transport-layer)
 5. [Host open sequence](#5-host-open-sequence)
 6. [Admin mode (register-file read/write)](#6-admin-mode-register-file-readwrite)
-7. [Operating commands — speed, sidetone, mode](#7-operating-commands--speed-sidetone-mode)
-8. [Operating commands — weight, Farnsworth, spacing](#8-operating-commands--weight-farnsworth-spacing)
-9. [Operating commands — PTT, hang time, output enable](#9-operating-commands--ptt-hang-time-output-enable)
-10. [Operating commands — paddle swap, ratios, echo, audio](#10-operating-commands--paddle-swap-ratios-echo-audio)
-11. [Operating commands — version, defaults, reset](#11-operating-commands--version-defaults-reset)
+7. [Operating commands — the real byte map](#7-operating-commands--the-real-byte-map)
+8. *(merged into § 7)*
+9. *(merged into § 7)*
+10. *(merged into § 7)*
+11. *(merged into § 7)*
 12. [Status byte format](#12-status-byte-format)
-13. [Memory buffer (load / unload / play / pause / resume)](#13-memory-buffer-load--unload--play--pause--resume)
+13. [Send buffer (text, backspace, clear)](#13-memory-buffer-load--unload--play--pause--resume)
 14. [Pin and event reporting](#14-pin-and-event-reporting)
 15. [Differences between WK1, WK2, and WK3](#15-differences-between-wk1-wk2-and-wk3)
 16. [Winkey emulator architecture in A1Keyer](#16-winkey-emulator-architecture-in-a1keyer)
@@ -197,29 +204,42 @@ The version byte is `0x07`.
 
 ### 4.2 Echo behavior
 
-The chip echoes every byte the host sends, on the same wire, in the same
-direction (host → chip and chip → host are *full duplex* on the same
-TX/RX pair). Echo behaviour by chip:
+The chip echoes each **sent text character** back to the host — but
+crucially it echoes it **after** the character has been keyed as CW, not
+when the byte is received, and it does **not** echo command or parameter
+bytes. Hosts use this echo to track send progress.
 
-| Chip | Echo by default | How to disable |
-|---|---|---|
-| WK1 | off | not configurable |
-| WK2 | on | not configurable in WK2; always on |
-| WK3 | on | admin register 1, bit 0 |
+| Chip | Character echo |
+|---|---|
+| WK1 | off |
+| WK2 | on (text chars, after keying) |
+| WK3 | on (configurable) |
 
-A1Keyer's bridge emulates WK2 echo (always on) — this is the safest
-choice for host compatibility; every WK2-aware host listens for the
-echo before sending the next byte.
+A1Keyer's bridge emulates WK2 echo: the device glue echoes each sent
+character (the earlier "echoes every byte including commands" model was
+wrong — commands/params are silent, only text is echoed).
 
 ### 4.3 Wire-level framing
 
-There is none. A command is one ASCII byte (`'S'`, `'V'`, `'A'`, …). A
-command that takes a parameter is two bytes (command + parameter). Status
-bytes from chip → host are unsolicited, one byte at a time, with no
-prefix or delimiter. Host software reads a continuous byte stream and
-dispatches based on the byte value: ASCII letters go to the command
-parser, high bytes (e.g. `0xF0..0xFF`) go to the pin-event parser
-(§ 14), everything else is status.
+There is no packet framing — but there IS a byte-value split that
+determines how each received byte is interpreted:
+
+- **0x00 – 0x1F → command bytes.** `0x00` is the admin prefix (a second
+  byte selects the admin sub-command). Every other value in this range
+  is an operating command; each consumes a fixed number of parameter
+  bytes that follow it (see § 7).
+- **0x20 – 0x7F → text.** Printable ASCII is appended to the send buffer
+  and keyed as CW **immediately**. Lowercase is upper-cased; `|` (0x7C)
+  is a half word-space. There is no "load then play" step for normal
+  sending — the host just streams the text.
+
+Chip → host: the version byte (on host-open), status bytes (3-MSB tag
+`110`, § 12), and a character echo (§ 4.2) are sent unsolicited, one
+byte at a time, no delimiters.
+
+This range split is the whole disambiguation mechanism: a message like
+`CQ TEST` streams as raw ASCII (all bytes ≥ 0x41) and can never collide
+with the command space (all ≤ 0x1F).
 
 ### 4.4 Transport in A1Keyer
 
@@ -377,93 +397,69 @@ A soft reset (§ 5.1, `0x00 0x01`) restores every value to those defaults.
 
 ---
 
-## 7. Operating commands — speed, sidetone, mode
+## 7. Operating commands — the real byte map
 
-| Sub | Command | Byte | Param | Range | Default | A1Keyer propagation |
-|---|---|---|---|---|---|---|
-| 7.1 | **Speed (WPM)** — `S` | `0x53` | next byte = WPM | 5-99 | 20 | `MorseModel::setWPM()` (`src/display_model.cpp:118-128`) |
-| 7.2 | **Speed pot value** — `V` | `0x56` | next byte = 0-255 | 0-255 | 128 | Maps to WPM linearly between SPEED_POT_MIN and SPEED_POT_MAX. |
-| 7.3 | **Sidetone frequency** — `A` | `0x41` | next byte = N | 50-255 | 60 (= 600 Hz) | `N × 10 = Hz`. `AudioEngine::setToneFrequency()` (`src/audio_engine.h:188`). |
-| 7.4 | **Sidetone on/off** — `B` | `0x42` | next byte = 0/1 | 0 or 1 | 1 | Mutes the sidetone (does *not* key the radio). |
-| 7.5 | **Keyer mode** — `K` | `0x4B` | next byte = mode | 0-6 | 1 (iambic B) | 0=iambic A, 1=iambic B, 2=ultimatic, 3=bug, 4=single, 5=straight. Bridge writes to `WinkeyBridge::_mode`; see § 16.4 rule 5. |
+Command bytes are **0x00–0x1F**. Values below are from the K3NG
+`service_winkey()` switch (verified by reading the source). Text
+(≥ 0x20) is not a command — see § 4.3.
 
-```
-// Set 25 WPM and 700 Hz sidetone, iambic B
-host  →  0x53 0x19          // S 25
-host  →  0x41 0x46          // A 70 (× 10 = 700 Hz)
-host  →  0x4B 0x01          // K 1  (iambic B)
-```
-
-A1Keyer's default sidetone is 600 Hz (`src/audio_engine.cpp:32`). The
-audio task reads `s_toneFrequency` atomically at every `fillBuffer()` call
-(`src/audio_engine.cpp:283-312`).
-
----
-
-## 8. Operating commands — weight, Farnsworth, spacing
-
-| Sub | Command | Byte | Param | Range | Default | Notes |
-|---|---|---|---|---|---|---|
-| 8.1 | **Weight** — `W` | `0x57` | weight % | 25-75 | 50 (= 100% nominal) | A1Keyer's `KeyEnvelop` does not currently accept a weight parameter; bridge stores for status readback (future: asymmetric `ditLengthSamples`). |
-| 8.2 | **Farnsworth WPM** — `N` | `0x4E` | WPM | 5-99 (≤ WPM) | 0 (off) | Bridge stores; future: new `MorseEncoder` parameter. |
-| 8.3 | **Letter space delta** — `I` | `0x49` | signed delta | -128..127 | 0 | A1Keyer's `CHAR_SPACE_UNITS = 3` is fixed (`src/morse_constants.h:50`). |
-| 8.4 | **Word space delta** — `Q` | `0x51` | signed delta | -128..127 | 0 | A1Keyer's `WORD_SPACE_UNITS = 7` is fixed (`src/morse_constants.h:53`). |
-
-```
-// Set 20 WPM with 10 WPM Farnsworth
-host  →  0x53 0x14          // S 20
-host  →  0x4E 0x0A          // N 10
-```
-
----
-
-## 9. Operating commands — PTT, hang time, output enable
-
-| Sub | Command | Byte | Param | Range | Default | Notes |
-|---|---|---|---|---|---|---|
-| 9.1 | **PTT tail** — `T` | `0x54` | 10 ms units | 0-255 (= 0-2.55 s) | 5 (= 50 ms) | Time PTT stays asserted after last CW element. |
-| 9.2 | **PTT lead** — `Y` | `0x59` | 10 ms units | 0-255 | 5 (= 50 ms) | Time PTT leads first CW element. |
-| 9.3 | **Hang time** — `H` | `0x48` | 100 ms units | 0-255 (= 0-25.5 s) | 0 (off) | Avoid repeated PTT toggling on brief gaps. |
-| 9.4 | **Output enable / XOFF** — `E` | `0x45` | 0/1 | 0 or 1 | 1 | Master CW output enable. `E 0` is XOFF; `E 1` is XON. |
-
-```
-// 100 ms PTT lead, 250 ms tail, 2 s hang time
-host  →  0x59 0x0A          // Y 10  (100 ms)
-host  →  0x54 0x19          // T 25  (250 ms)
-host  →  0x48 0x14          // H 20  (2.0 s)
-host  →  0x45 0x01          // E 1   (enable)
-```
-
-The `E` command is the **host-side equivalent of the operator toggling
-the KEYING overlay with `;`** (`docs/keyer.md § 5`). Both code paths
-land on `RadioKeyer::setEnabled()` (`src/radio_keyer.cpp:85-99`), which
-forces GPIO4 LOW immediately on disable. The bridge does *not* bypass
-the user's setting; if the operator has turned keying off via the
-keyboard, the bridge's `E 1` only re-enables the *intent* — GPIO4
-stays LOW until the operator also presses `;`. (See § 16.4 rule 3.)
-
----
-
-## 10. Operating commands — paddle swap, ratios, echo, audio
-
-| Sub | Command | Byte | Param | Range | Default | Notes |
-|---|---|---|---|---|---|---|
-| 10.1 | **Paddle swap** — `R` | `0x52` | 0/1 | 0 or 1 | 0 | Swap DIT/DAH. Bridge writes to `_mode` (future work; § 16.4 rule 5). |
-| 10.2 | **Dit/dah ratio** — `D` | `0x44` | 0.1 units | 25-75 | 30 (= 3.0) | DAH = DIT × ratio. A1Keyer's DAH is 3 × DIT (`src/morse_constants.h:40`); bridge stores for status readback. |
-| 10.3 | **Paddle echo** — `J` | `0x4A` | 0/1 | 0 or 1 | 0 | When 1, the bridge echoes paddle events as pin-event bytes (§ 14). |
-| 10.4 | **Compander / audio** — `C` | `0x43` | mode | 0-2 | 0 | Audio compression mode for the chip's DAC. A1Keyer's I²S path is uncompressed; bridge accepts and stores the byte. |
-
----
-
-## 11. Operating commands — version, defaults, reset
-
-| Sub | Command | Bytes | Notes |
+| Byte | Command | Params | A1Keyer handling |
 |---|---|---|---|
-| 11.1 | Version query | (host-open, § 5.1) | The host-open sequence doubles as the version query — the reply is the version byte. |
-| 11.2 | Defaults dump | `0x00 0x00 0x00 0x02` | 32 bytes back: 16 registers × (lo, hi) at default values. |
-| 11.3 | Soft reset | `0x00 0x00 0x01` | Reset all state to defaults, re-enter operating mode. |
-| 11.4 | Echo toggle (WK3 only) | admin register 1, bit 0 | A1Keyer's WK2 baseline: echo always on, register ignored. |
-| 11.5 | Calibration / reserved | various | Reserved by K1EL but not implemented in WK2 firmware — ignored by A1Keyer's bridge with a debug log line. |
+| `0x00` | Admin prefix | +1 (sub-cmd) | See § 6 (host-open/close/reset/WK1-WK2 mode). |
+| `0x01` | Sidetone control | 1 | Low nibble 1–10 selects a preset frequency; bit 7 = paddle-only. Mapped to Hz and sent to `AudioEngine::setToneFrequency()` (A1Keyer clamps to [300,900]). `[verify]` exact preset table. |
+| `0x02` | Set speed (WPM) | 1 | `0` = use pot (ignored — no pot). Else clamp 5–99 → `MorseModel::setWPM()` (clamps [5,50]). |
+| `0x03` | Weighting | 1 | Stored for status readback (no audio effect yet — § 16.6). |
+| `0x04` | PTT lead/tail | 2 | Stored (lead, tail). |
+| `0x05` | Set speed pot | 3 | Consumed; no physical pot. |
+| `0x06` | Pause | 1 | Accepted; PTT/hang timing deferred (§ 16.6). |
+| `0x07` | Get speed pot | 0 | Replies one byte (top bit set). |
+| `0x08` | Backspace | 0 | Removes the last un-sent char from the send buffer. |
+| `0x09` | Pin config | 1 | Stored. |
+| `0x0A` | Clear buffer | 0 | Clears the send buffer + stops sending. |
+| `0x0B` | Key immediate (tune) | 1 | 1 = key down, 0 = up → `RadioKeyer` (gated by operator KEYING, § 16.4 r3). |
+| `0x0C` | HSCW | 1 | Consumed; not implemented. |
+| `0x0D` | Farnsworth | 1 | Stored (§ 16.6). |
+| `0x0E` | Set keyer mode | 1 | Stored (iambic A/B, ultimatic, bug, paddle-swap bits). `[verify]` bit layout. |
+| `0x0F` | Load defaults | 15 | All 15 bytes consumed; not applied. |
+| `0x10` | First extension | 1 | Consumed. |
+| `0x11` | Key compensation | 1 | Consumed. |
+| `0x12` | (reserved) | 1 | Consumed. |
+| `0x13` | Null | 0 | No-op. |
+| `0x14` | Software paddle | 1 | Consumed. |
+| `0x15` | Request status | 0 | Replies the status byte (§ 12). |
+| `0x16` | Pointer op | 1 | Consumed. |
+| `0x17` | Dit/dah ratio | 1 | Stored (§ 16.6). |
+| `0x18`–`0x1F` | Buffered commands | varies | Buffered PTT (0x18), key (0x19), wait (0x1A), merge (0x1B), buffered speed (0x1C), buffered HSCW (0x1D), cancel-speed (0x1E, 0 params), NOP (0x1F, 0 params). Accepted; buffered timing deferred. |
+
+Example — set 25 WPM, sidetone preset 5, then send "CQ TEST":
+```
+host  →  0x02 0x19          // speed = 25 WPM
+host  →  0x01 0x05          // sidetone preset 5
+host  →  'C' 'Q' ' ' 'T' 'E' 'S' 'T'   // text (0x20+) → keyed as CW
+```
+
+Note how the letters `S` (0x53) and `T` (0x54) in "TEST" are **text**,
+not the (nonexistent) speed/PTT commands — this is the byte-range split
+of § 4.3. A1Keyer's default sidetone is 600 Hz (`src/audio_engine.cpp`).
+
+### 7.1 Commands A1Keyer acts on vs. stores
+
+- **Acts on:** `0x01` sidetone, `0x02` speed, `0x08` backspace,
+  `0x0A` clear, `0x0B` key-immediate, `0x15` status, plus all text
+  (≥ 0x20) → CW.
+- **Stores for status readback only** (no audio effect yet, § 16.6):
+  weighting, PTT times, Farnsworth, keyer mode, dit/dah ratio.
+- **Consumes and ignores:** pot, pin-config, HSCW, extensions, key-comp,
+  load-defaults, software paddle, pointer, buffered commands.
+
+### 7.2 Output enable and the operator's KEYING setting
+
+There is no standalone "output enable" byte in the real protocol (the
+old doc's `E`=0x45 was fabricated). Host keying still cannot override the
+operator: any host key-down (`0x0B`) routes through
+`RadioKeyer::setEnabled()` (`src/radio_keyer.cpp`), which is AND-ed with
+the operator's KEYING toggle — GPIO stays LOW until the operator also
+enables keying locally. (See § 16.4 rule 3.)
 
 ---
 
@@ -567,25 +563,33 @@ bit (§ 12.2 bit 0) to throttle sending.
 
 ### 13.2 Commands
 
-| Command | Bytes | Notes |
+**Correction:** the earlier `L`/`U`/`P` (0x4C/0x55/0x50) "load buffer /
+play slot" table was fabricated — those are printable ASCII letters and
+would be *sent as CW*, not interpreted as commands. In the real
+protocol there is no host-visible load/play framing for the normal send
+path: the host simply streams text (bytes ≥ 0x20) and the chip keys it
+immediately (§ 4.3, § 7). The relevant real commands that touch the send
+buffer are:
+
+| Byte | Command | Notes |
 |---|---|---|
-| Load buffer | `0x4C` (`L`) | Subsequent bytes (until end-of-frame) append to buffer. ASCII. |
-| Unload buffer | `0x55` (`U`) | Clear buffer. |
-| Play buffer slot | `0x50 0xNN` (`P <slot>`) | Slot 0 = main buffer; slots 1-9 are optional. |
-| Pause | `0x42 0x00` (`B 0`) | Pause playback. |
-| Resume | `0x42 0x01` (`B 1`) | Resume. |
+| (≥ 0x20) | Send text | Appended to the send buffer, keyed as CW at once. |
+| `0x08` | Backspace | Remove the last un-sent character. |
+| `0x0A` | Clear buffer | Discard everything not yet sent; stop. |
+| `0x06` | Pause | `[verify]` pause/resume of the send buffer. |
+
+A1Keyer's `WinkeyBuffer` (`src/winkey_buffer.h`) is a FIFO of pending
+characters; `WinkeyBridge::poll()` drains it to `MorseGenerator`.
 
 ### 13.3 Prosigns `[verify]`
 
 Prosigns (`<SK>`, `<BK>`, `<KN>`, `<AR>`, `<AS>`, `<VE>`, `<HH>`,
-`<INT>`, `<RR>`) are encoded by the host as ASCII between angle
-brackets:
+`<INT>`, `<RR>`) are sent as ASCII text; K1EL uses the `merge` command
+(0x1B) or a `\` between two letters to bond them into one symbol:
 
 ```
-host  →  0x4C            // L (start load)
-host  →  'C' 'Q' ' ' '<' 'A' 'R' '>'
-host  →  0x55            // U (end load)
-host  →  0x50 0x00       // P 0 (play slot 0)
+host  →  'C' 'Q' ' '                  // text, keyed immediately
+host  →  0x1B 'A' 'R'                 // merge: <AR> as one symbol
 ```
 
 A1Keyer's `MorseEncoder` (`src/morse_encoder.cpp`) does **not** currently
@@ -813,44 +817,29 @@ lines 282-301. The existing diagram already has `WinkeyBridge (future)`
 as a placeholder; this doc replaces that placeholder with the real
 architecture.
 
-### 16.3 Command dispatch table
+### 16.3 Command dispatch
 
-The bridge implements a `constexpr` table mapping ASCII command bytes to
-handler functions:
+The bridge dispatches on the byte-value split (§ 4.3): text (≥ 0x20) is
+accumulated in the send buffer; command bytes (0x00–0x1F) switch on the
+real WK codes (§ 7). The implementation (`src/winkey_bridge.cpp`) uses a
+`switch` with a `paramCountFor()` helper that returns how many parameter
+bytes each command consumes, so the parser knows when a command is
+complete:
 
 ```cpp
-struct CmdHandler {
-    uint8_t code;
-    void (*handler)(WinkeyBridge&, uint8_t param);
-};
-static constexpr CmdHandler kCmds[] = {
-    { 'S', &onSpeedWPM },
-    { 'V', &onSpeedPot },
-    { 'A', &onSidetone },
-    { 'B', &onSidetoneToggle },
-    { 'K', &onKeyerMode },
-    { 'W', &onWeight },
-    { 'N', &onFarnsworth },
-    { 'I', &onLetterSpace },
-    { 'Q', &onWordSpace },
-    { 'T', &onPTTTail },
-    { 'Y', &onPTTLead },
-    { 'H', &onHangTime },
-    { 'E', &onOutputEnable },
-    { 'R', &onPaddleSwap },
-    { 'D', &onDitDahRatio },
-    { 'J', &onPaddleEcho },
-    { 'C', &onCompander },
-    { 'L', &onBufferLoad },
-    { 'U', &onBufferUnload },
-    { 'P', &onBufferPlay },
-    { 0x00, &onHostOpen },
-};
+// feed(byte):
+//   0x00        -> admin (next byte = sub-command)
+//   0x01..0x1F  -> command; collect paramCountFor(cmd) param bytes
+//   >= 0x20     -> text: buffer.push(toupper(byte))  (send as CW)
+//
+// Real command codes (see § 7): 0x01 sidetone, 0x02 speed, 0x03 weight,
+// 0x04 PTT times, 0x08 backspace, 0x0A clear, 0x0B key, 0x0D Farnsworth,
+// 0x0E mode, 0x15 status, 0x17 ratio, 0x18-0x1F buffered.
 ```
 
-The table-driven approach matches the style used in `src/main.cpp` for
-keyboard handling, and it makes "is this command implemented?" a
-one-grep question.
+The earlier version of this section listed ASCII-letter codes
+(`'S'`, `'A'`, `'L'`, …) — those were the fabricated encoding and do not
+exist in the real protocol.
 
 ### 16.4 State propagation rules — the critical rules
 
