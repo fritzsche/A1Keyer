@@ -150,6 +150,13 @@ static void handleKeyboard() {
     //                     is less than kBKeyLockoutMs and would suppress
     //                     the very first press. bFirstPress bypasses the
     //                     time check on the first edge only.
+    //   wasB=true early — NimBLEDevice::init() inside startAdvertising()
+    //                     blocks for ~3 s. loop() is frozen during that
+    //                     time so wasB never updates. When loop() resumes,
+    //                     M5.update() sees the key still held and bKey=true
+    //                     with wasB=false — a spurious second edge that
+    //                     immediately stops advertising. Setting wasB=true
+    //                     before the blocking call prevents this.
     static uint32_t lastBTriggerMillis = 0;
     static bool     bFirstPress        = true;
     constexpr uint32_t kBKeyLockoutMs  = 6000;
@@ -160,6 +167,7 @@ static void handleKeyboard() {
         if (allowed) {
             bFirstPress        = false;
             lastBTriggerMillis = nowMs;
+            wasB               = true;  // suppress the spurious edge after blocking init
             Serial.printf("[KB] B pressed: state was %s\n",
                 BleNus::state() == BleNus::State::Off ? "Off" :
                 BleNus::state() == BleNus::State::Advertising ? "Advertising" :

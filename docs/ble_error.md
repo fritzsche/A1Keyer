@@ -803,6 +803,91 @@ D NimBLEAdvertising: setScanResponseData: 11 07 9e ca dc 24 0e e5 a9 e0 93 f3 a3
 | Windows | AD 0x09 in primary ADV_IND | scan response | "A1Keyer" ✓ |
 | Linux / BlueZ | AD 0x09 in primary ADV_IND | scan response | visible ✓ |
 
+## 8e. Address bug — malformed public address on air (2026-08-02)
+
+**Status: fix applied in `src/ble_nus_esp32.cpp`, pending on-device
+verification.** After §8d made the advertising packets correct (verified
+in the serial log), the device still showed as "Unknown Device" on
+Windows and stayed invisible on macOS. Re-reading the address code with
+fresh eyes found the real remaining defect.
+
+### The bug
+
+The §8c address code did this before `NimBLEDevice::init()`:
+
+```cpp
+uint8_t mac[6];
+esp_efuse_mac_get_default(mac);
+mac[5] |= 0xC0;                       // static-random marker bits
+NimBLEAddress staticAddr(mac, BLE_ADDR_RANDOM);   // <-- never applied!
+esp_iface_mac_addr_set(mac, ESP_MAC_BT);          // sets PUBLIC MAC base
+```
+
+Two things were wrong:
+
+1. **`staticAddr` was never applied.** The `NimBLEAddress` object was
+   constructed and then used only in the log line. No `setOwnAddr()` /
+   `setOwnAddrType()` call ever told NimBLE to advertise as random.
+
+2. **`esp_iface_mac_addr_set(ESP_MAC_BT)` sets the *public* MAC base.**
+   With NimBLE still on its default `own_addr_type = BLE_OWN_ADDR_PUBLIC`,
+   the on-air address was a **public** address whose top two bits were
+   forced to `11` — i.e. a public address with the bit pattern of a
+   static-random one. That is malformed: macOS Core Bluetooth rejects the
+   type/bits mismatch outright (invisible), and Windows shows it as a
+   generic "Unknown Device".
+
+So §8c's stated goal ("macOS treats the address as a stable identity")
+was never actually achieved — the mechanism it described (public address
+from the MAC base) is exactly what macOS refuses.
+
+### The fix
+
+Set a real Static Random Address through NimBLE's own API, **after**
+`init()`, and drop the `esp_iface_mac_addr_set` hack entirely:
+
+```cpp
+uint8_t mac[6];
+esp_efuse_mac_get_default(mac);
+mac[5] |= 0xC0;                       // valid static-random marker
+NimBLEAddress staticAddr(mac, BLE_ADDR_RANDOM);
+NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM);
+NimBLEDevice::setOwnAddr(staticAddr);
+```
+
+Now the advertised address type (RANDOM) matches the address bits
+(static-random), which is what all three host stacks expect.
+
+### Caveat — contradicts §8c's claim about post-init setOwnAddr
+
+§8c states that post-init `setOwnAddr()` "does NOT propagate to the
+controller" on this combo (citing NimBLE-Arduino issue #430). That claim
+was made about the *old* broken path and may not hold now. This fix
+depends on post-init `setOwnAddr()` working. **Verify on-device:** scan
+with LightBlue / nRF Connect and confirm the advertised address equals
+the `[BLE] own addr=...` value in the serial log.
+
+If the advertised address does NOT match (i.e. #430 really does apply),
+fall back to one of:
+- burn a public address into eFuse (`espefuse.py burn-bt-address`) and
+  keep `BLE_OWN_ADDR_PUBLIC` — a genuine, well-formed public address that
+  macOS accepts; or
+- a `deinit()` → set MAC base (without the `0xC0` bit hack) → `init()`
+  round-trip so the controller reads a clean public MAC.
+
+### Expected serial log after fix
+
+```
+[BLE] NimBLEDevice::init OK (free internal=NNNNN B)
+[BLE] own addr=XX:XX:XX:XX:XX:CX (static-random)
+[BLE] server created
+...
+setAdvertisementData: 02 01 06 08 09 41 31 4b 65 79 65 72
+setScanResponseData:  11 07 9e ca dc 24 ...
+```
+
+The address MSB should end in `C`, `D`, `E`, or `F` (top two bits set).
+
 ## 9. References
 
 - `~/.platformio/packages/framework-arduinoespressif32/libraries/BLE/src/BLEDevice.cpp` —

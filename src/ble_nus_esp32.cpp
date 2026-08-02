@@ -171,51 +171,6 @@ bool BleNus::begin(const char* deviceName) {
 
     Log::info("[BLE] begin: name='%s'", _deviceName);
 
-    // ---------------------------------------------------------------------
-    // Stable static random BLE address — MUST be set BEFORE the BT
-    // controller is initialised.
-    //
-    // NimBLE defaults to BLE_OWN_ADDR_PUBLIC; on ESP32-S3 modules
-    // without a factory-programmed public address (the Cardputer ADV
-    // is one), NimBLE falls back to BLE_OWN_ADDR_RANDOM — but with a
-    // fresh Non-Resolvable Private Address on every boot. macOS System
-    // Settings → Bluetooth filters NRPA out of the device list unless
-    // already paired, so the Cardputer shows up on Windows and on BLE
-    // scanners (LightBlue, nRF Connect) but never on macOS Settings.
-    //
-    // Fix: derive a Static Random Address from the eFuse factory MAC
-    // (unique per chip, stable across reboots). The top two bits of
-    // byte[5] must be '11' for the address to be recognised as a valid
-    // Static Random Address by the Bluetooth spec. macOS then displays
-    // it in Settings under the device name.
-    //
-    // Why BEFORE NimBLEDevice::init() and not after: on ESP32-S3 the BT
-    // controller reads its MAC from internal storage during
-    // esp_bt_controller_init(). Post-init NimBLE setOwnAddr() calls
-    // update the host's identity record but do NOT propagate to the
-    // controller — the controller keeps using whatever NRPA it
-    // generated on its own (see NimBLE-Arduino issue #430). Setting the
-    // BT interface MAC via esp_iface_mac_addr_set() before init() puts
-    // the address where the controller reads it.
-    //
-    // esp_iface_mac_addr_set() is RAM-only for the specific interface,
-    // so it does not touch eFuse and resets at every boot — exactly
-    // the lifetime we want for a static-random identity.
-    // ---------------------------------------------------------------------
-    {
-        uint8_t mac[6];
-        esp_efuse_mac_get_default(mac);
-        mac[5] |= 0xC0;  // Top two bits = 11 → marks it as a Static Random Address
-        NimBLEAddress staticAddr(mac, BLE_ADDR_RANDOM);
-        if (esp_iface_mac_addr_set(mac, ESP_MAC_BT) != ESP_OK) {
-            Log::warning("[BLE] esp_iface_mac_addr_set(BT) failed — "
-                         "falling back to controller default (NRPA)");
-        } else {
-            Log::info("[BLE] BLE addr=%s (static-random, derived from eFuse MAC)",
-                      staticAddr.toString().c_str());
-        }
-    }
-
     // NimBLEDevice::init() handles nvs_flash_init + btStart + NimBLE
     // host-task bring-up correctly on ESP32-S3 + arduino-esp32 3.x.
     // It also wires up the framework's NimBLE HCI callbacks, so the
@@ -243,6 +198,43 @@ bool BleNus::begin(const char* deviceName) {
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);  // +9 dBm — Cardputer ADV antenna is fine
     Log::info("[BLE] NimBLEDevice::init OK (free internal=%u B)",
               (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+
+    // ---------------------------------------------------------------------
+    // Stable static random BLE address.
+    //
+    // Why this matters: NimBLE defaults to own_addr_type =
+    // BLE_OWN_ADDR_PUBLIC. On ESP32-S3 modules without a factory public
+    // address (the Cardputer ADV is one), the on-air address is then
+    // either an all-zero/garbage public address or a per-boot NRPA —
+    // both of which macOS System Settings filters out of its device list.
+    //
+    // The fix is a proper Static Random Address applied through NimBLE's
+    // own API (setOwnAddrType + setOwnAddr), NOT by rewriting the
+    // controller's public MAC base. A previous version did the latter via
+    // esp_iface_mac_addr_set(ESP_MAC_BT) with the top two bits forced to
+    // 11 — that produced a *public* address whose bits look random, which
+    // is malformed and macOS rejects outright (Windows showed it as
+    // "Unknown Device"). See docs/ble_error.md § 8c/§ 8e.
+    //
+    // A Static Random Address is derived from the per-chip eFuse factory
+    // MAC (stable across reboots) with the top two bits of the MSB set to
+    // 1 (the BT-spec marker for static-random). It must be set AFTER
+    // NimBLEDevice::init() so the host is running to accept the HCI
+    // LE_Set_Random_Address command.
+    {
+        uint8_t mac[6];
+        esp_efuse_mac_get_default(mac);
+        mac[5] |= 0xC0;  // top two bits = 11 → valid Static Random Address
+        NimBLEAddress staticAddr(mac, BLE_ADDR_RANDOM);
+        if (NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM) &&
+            NimBLEDevice::setOwnAddr(staticAddr)) {
+            Log::info("[BLE] own addr=%s (static-random)",
+                      staticAddr.toString().c_str());
+        } else {
+            Log::warning("[BLE] setOwnAddr(static-random) failed — "
+                         "falling back to NimBLE default address type");
+        }
+    }
 
     // Create the server and register our callbacks.
     _pServer = NimBLEDevice::createServer();
