@@ -137,22 +137,28 @@ static void handleKeyboard() {
     // The Cardputer ADV's TCA8418 keyboard has been observed to
     // re-emit rapid press/release edges on a held key (anti-ghosting
     // scan), which would cause the toggle to flip ON-OFF-ON-OFF in
-    // a few ms and never reach a stable Advertising state. Two
-    // guards handle this:
+    // a few ms and never reach a stable Advertising state.
     //
-    //   kBKeyDebounceMs — only the first edge within this window is
-    //                     honoured. Squashes contact-bounce chatter.
     //   kBKeyLockoutMs  — after every successful toggle, no other
     //                     toggle is honoured for this many ms. Lets
     //                     Mac/iOS/Windows scanners actually see the
     //                     advert before the user (or auto-repeat)
     //                     could disable it again.
+    //   bFirstPress     — the lockout uses elapsed time since the last
+    //                     trigger; on first boot lastBTriggerMillis=0
+    //                     so the elapsed time equals uptime (~5 s) which
+    //                     is less than kBKeyLockoutMs and would suppress
+    //                     the very first press. bFirstPress bypasses the
+    //                     time check on the first edge only.
     static uint32_t lastBTriggerMillis = 0;
-    constexpr uint32_t kBKeyDebounceMs = 300;
+    static bool     bFirstPress        = true;
     constexpr uint32_t kBKeyLockoutMs  = 6000;
     if (bKey && !wasB) {
         uint32_t nowMs = millis();
-        if (nowMs - lastBTriggerMillis > kBKeyDebounceMs + kBKeyLockoutMs) {
+        bool allowed = bFirstPress ||
+                       (nowMs - lastBTriggerMillis > kBKeyLockoutMs);
+        if (allowed) {
+            bFirstPress        = false;
             lastBTriggerMillis = nowMs;
             Serial.printf("[KB] B pressed: state was %s\n",
                 BleNus::state() == BleNus::State::Off ? "Off" :
