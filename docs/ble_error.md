@@ -803,90 +803,84 @@ D NimBLEAdvertising: setScanResponseData: 11 07 9e ca dc 24 0e e5 a9 e0 93 f3 a3
 | Windows | AD 0x09 in primary ADV_IND | scan response | "A1Keyer" ✓ |
 | Linux / BlueZ | AD 0x09 in primary ADV_IND | scan response | visible ✓ |
 
-## 8e. Address bug — malformed public address on air (2026-08-02)
+## 8e. ROOT CAUSE — wrong premise all along: cache + macOS by-design (2026-08-02)
 
-**Status: fix applied in `src/ble_nus_esp32.cpp`, pending on-device
-verification.** After §8d made the advertising packets correct (verified
-in the serial log), the device still showed as "Unknown Device" on
-Windows and stayed invisible on macOS. Re-reading the address code with
-fresh eyes found the real remaining defect.
+**Status: firmware reverted to the canonical setup. The remaining symptoms
+are NOT firmware bugs.** After §8d produced correct advertising packets
+(name in primary ADV_IND, UUID in scan response — verified byte-for-byte
+in the serial log), the device still showed "Unknown Device" on Windows
+and nothing on macOS. Web research (Microsoft Learn, Apple developer
+forums, NimBLE issues — see § 9) finally identified why, and it was not
+the firmware.
 
-### The bug
+### The whole premise was wrong
 
-The §8c address code did this before `NimBLEDevice::init()`:
+The original goal stated at the top of this document — *"A1Keyer shows up
+in macOS System Settings → Bluetooth"* — is **impossible by design**.
+macOS System Settings → Bluetooth does **not** list generic BLE
+peripherals that advertise a custom 128-bit service (like Nordic UART).
+It only shows Classic Bluetooth devices and BLE devices with
+macOS-recognised profiles (HID, audio) or already-paired devices. Every
+attempt to "make it appear in macOS Settings" — the static-random
+address, the MAC-base hack, the malformed-public-address theory in the
+earlier version of this section — was chasing a target that does not
+exist.
 
-```cpp
-uint8_t mac[6];
-esp_efuse_mac_get_default(mac);
-mac[5] |= 0xC0;                       // static-random marker bits
-NimBLEAddress staticAddr(mac, BLE_ADDR_RANDOM);   // <-- never applied!
-esp_iface_mac_addr_set(mac, ESP_MAC_BT);          // sets PUBLIC MAC base
-```
+**To use this device from a Mac you must use a scanner app:** LightBlue,
+nRF Connect for Desktop, or Apple's Bluetooth Explorer (from Additional
+Tools for Xcode). The device advertising correctly and being visible in
+those apps *is* success.
 
-Two things were wrong:
+### Windows "Unknown Device" is a host-side cache, not a firmware bug
 
-1. **`staticAddr` was never applied.** The `NimBLEAddress` object was
-   constructed and then used only in the log line. No `setOwnAddr()` /
-   `setOwnAddrType()` call ever told NimBLE to advertise as random.
+Windows caches BLE device names in the registry under
+`HKLM\SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters\Devices`,
+keyed by device address. Once an entry exists, Windows shows the **cached**
+name and stops honouring the currently-advertised Complete Local Name.
 
-2. **`esp_iface_mac_addr_set(ESP_MAC_BT)` sets the *public* MAC base.**
-   With NimBLE still on its default `own_addr_type = BLE_OWN_ADDR_PUBLIC`,
-   the on-air address was a **public** address whose top two bits were
-   forced to `11` — i.e. a public address with the bit pattern of a
-   static-random one. That is malformed: macOS Core Bluetooth rejects the
-   type/bits mismatch outright (invisible), and Windows shows it as a
-   generic "Unknown Device".
+Because this device's address is stable across reflashes, the *first*
+time Windows saw it — during one of the earlier broken iterations, before
+the name was correctly in the packet — Windows cached an "Unknown Device"
+entry. It now shows that stale entry regardless of the correct
+`08 09 41 31 4b 65 79 65 72` ("A1Keyer") bytes now being advertised.
 
-So §8c's stated goal ("macOS treats the address as a stable identity")
-was never actually achieved — the mechanism it described (public address
-from the MAC base) is exactly what macOS refuses.
+**Fix (host-side, no firmware change):**
+1. Settings → Bluetooth & devices → remove/forget the device.
+2. If it persists, delete the device's key under
+   `BTHPORT\Parameters\Devices` in the registry (or use a "Bluetooth
+   Device Reset" tool), then re-scan.
 
-### The fix
+The advertised bytes `02 01 06 08 09 41 31 4b 65 79 65 72` decode cleanly
+to flags (`0x06` = LE General Discoverable + BR/EDR unsupported) +
+Complete Local Name "A1Keyer". The advertisement is correct.
 
-Set a real Static Random Address through NimBLE's own API, **after**
-`init()`, and drop the `esp_iface_mac_addr_set` hack entirely:
+### Firmware reverted to canonical setup
 
-```cpp
-uint8_t mac[6];
-esp_efuse_mac_get_default(mac);
-mac[5] |= 0xC0;                       // valid static-random marker
-NimBLEAddress staticAddr(mac, BLE_ADDR_RANDOM);
-NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM);
-NimBLEDevice::setOwnAddr(staticAddr);
-```
+All address manipulation was removed from `src/ble_nus_esp32.cpp`. NimBLE
+now uses its default controller address. The advertising setup remains the
+§8d layout (name in primary, UUID in scan response), which the NimBLE New
+User Guide and issue #1144 confirm is the correct, standard split for a
+128-bit-UUID peripheral. No `setOwnAddr` / `esp_iface_mac_addr_set` /
+`0xC0` bit hacks.
 
-Now the advertised address type (RANDOM) matches the address bits
-(static-random), which is what all three host stacks expect.
+### Verification (corrected)
 
-### Caveat — contradicts §8c's claim about post-init setOwnAddr
+1. Press `b`/`B`. Serial log shows `advertising as 'A1Keyer'`.
+2. **macOS:** open **LightBlue** or **nRF Connect** (NOT System Settings).
+   `A1Keyer` appears with the NUS service. Connect and round-trip bytes.
+3. **Windows:** if it shows "Unknown Device", forget the device and clear
+   the Bluetooth cache (above), then re-scan — it should then show
+   "A1Keyer". Testing with nRF Connect for Windows sidesteps the cache
+   entirely.
 
-§8c states that post-init `setOwnAddr()` "does NOT propagate to the
-controller" on this combo (citing NimBLE-Arduino issue #430). That claim
-was made about the *old* broken path and may not hold now. This fix
-depends on post-init `setOwnAddr()` working. **Verify on-device:** scan
-with LightBlue / nRF Connect and confirm the advertised address equals
-the `[BLE] own addr=...` value in the serial log.
+### What the earlier §8e (malformed-address theory) got wrong
 
-If the advertised address does NOT match (i.e. #430 really does apply),
-fall back to one of:
-- burn a public address into eFuse (`espefuse.py burn-bt-address`) and
-  keep `BLE_OWN_ADDR_PUBLIC` — a genuine, well-formed public address that
-  macOS accepts; or
-- a `deinit()` → set MAC base (without the `0xC0` bit hack) → `init()`
-  round-trip so the controller reads a clean public MAC.
+The previous version of this section claimed the on-air public address was
+malformed (public type + static-random bits) and that macOS rejected it.
+No authoritative source supports that mechanism, and it did not explain
+the symptoms — the cache (Windows) and by-design behaviour (macOS) do,
+completely. That theory is retracted.
 
-### Expected serial log after fix
-
-```
-[BLE] NimBLEDevice::init OK (free internal=NNNNN B)
-[BLE] own addr=XX:XX:XX:XX:XX:CX (static-random)
-[BLE] server created
-...
-setAdvertisementData: 02 01 06 08 09 41 31 4b 65 79 65 72
-setScanResponseData:  11 07 9e ca dc 24 ...
-```
-
-The address MSB should end in `C`, `D`, `E`, or `F` (top two bits set).
 
 ## 9. References
 
@@ -912,3 +906,18 @@ The address MSB should end in `C`, `D`, `E`, or `F` (top two bits set).
 - `docs/ARCHITECTURE.md` — overall firmware architecture.
 - `docs/keyer.md § 6` — the producer/consumer seam where Winkey will
   plug in once BLE transport is working.
+
+### External sources for § 8e (host-side behaviour)
+
+- Windows caches BLE names in `BTHPORT\Parameters\Devices`; shows stale
+  cached name — https://stackoverflow.com/questions/22107734/reset-windows-bluetooth-name-cache
+- Advertised Name property intermittently empty on Windows —
+  https://stackoverflow.com/questions/67680993/
+- Clearing the Windows Bluetooth cache —
+  https://www.windowsdigitals.com/how-to-clear-bluetooth-cache-in-windows-11-or-10/
+- Apple: macOS System Settings does not discover custom BLE peripherals;
+  use a scanner app — https://developer.apple.com/forums/thread/771069
+- NimBLE 31-byte advert limit; name vs UUID split into scan response —
+  https://github.com/h2zero/NimBLE-Arduino/issues/1144
+- NimBLE-Arduino New User Guide (canonical advertising setup) —
+  https://h2zero.github.io/NimBLE-Arduino/md__new__user__guide.html

@@ -199,42 +199,14 @@ bool BleNus::begin(const char* deviceName) {
     Log::info("[BLE] NimBLEDevice::init OK (free internal=%u B)",
               (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 
-    // ---------------------------------------------------------------------
-    // Stable static random BLE address.
-    //
-    // Why this matters: NimBLE defaults to own_addr_type =
-    // BLE_OWN_ADDR_PUBLIC. On ESP32-S3 modules without a factory public
-    // address (the Cardputer ADV is one), the on-air address is then
-    // either an all-zero/garbage public address or a per-boot NRPA —
-    // both of which macOS System Settings filters out of its device list.
-    //
-    // The fix is a proper Static Random Address applied through NimBLE's
-    // own API (setOwnAddrType + setOwnAddr), NOT by rewriting the
-    // controller's public MAC base. A previous version did the latter via
-    // esp_iface_mac_addr_set(ESP_MAC_BT) with the top two bits forced to
-    // 11 — that produced a *public* address whose bits look random, which
-    // is malformed and macOS rejects outright (Windows showed it as
-    // "Unknown Device"). See docs/ble_error.md § 8c/§ 8e.
-    //
-    // A Static Random Address is derived from the per-chip eFuse factory
-    // MAC (stable across reboots) with the top two bits of the MSB set to
-    // 1 (the BT-spec marker for static-random). It must be set AFTER
-    // NimBLEDevice::init() so the host is running to accept the HCI
-    // LE_Set_Random_Address command.
-    {
-        uint8_t mac[6];
-        esp_efuse_mac_get_default(mac);
-        mac[5] |= 0xC0;  // top two bits = 11 → valid Static Random Address
-        NimBLEAddress staticAddr(mac, BLE_ADDR_RANDOM);
-        if (NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM) &&
-            NimBLEDevice::setOwnAddr(staticAddr)) {
-            Log::info("[BLE] own addr=%s (static-random)",
-                      staticAddr.toString().c_str());
-        } else {
-            Log::warning("[BLE] setOwnAddr(static-random) failed — "
-                         "falling back to NimBLE default address type");
-        }
-    }
+    // No address manipulation: NimBLE uses the controller's default
+    // (public, derived from the eFuse MAC) which is stable across boots
+    // and is the canonical setup. Earlier iterations set a static-random
+    // address to try to make the device appear in macOS System Settings —
+    // that was chasing a non-problem: macOS System Settings does NOT show
+    // custom-service BLE peripherals (NUS) at all, by design. A Mac must
+    // use a scanner app (LightBlue / nRF Connect / Bluetooth Explorer) to
+    // see and connect to this device. See docs/ble_error.md § 8e.
 
     // Create the server and register our callbacks.
     _pServer = NimBLEDevice::createServer();
