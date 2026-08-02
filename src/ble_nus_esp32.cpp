@@ -240,17 +240,32 @@ bool BleNus::begin(const char* deviceName) {
     // service becomes visible to scanners once startAdvertising() runs.
     Log::info("[BLE] NUS service registered");
 
-    // Build advertising. We expose the service UUID so a scanner can
-    // identify us as a NUS peripheral; the device name is the human-
-    // visible identity in macOS Bluetooth settings.
+    // Build advertising. We expose the service UUID in the primary ADV_IND
+    // packet and the device name in the scan response.
+    //
+    // Call order matters for NimBLE-Arduino 2.x:
+    //   enableScanResponse(true) MUST come before setName().
+    //   NimBLEAdvertising::setName() checks m_scanResp at call time; if
+    //   true it stores the name in m_scanData (scan response), otherwise
+    //   it lands in m_advData (primary ADV_IND). With the name in the
+    //   primary packet m_scanData stays empty — the scan response is then
+    //   never sent, and macOS (which issues SCAN_REQ for connectable
+    //   ADV_IND peripherals and reads the name from the response) never
+    //   sees the device name.  Windows is more lenient; Linux/BlueZ is
+    //   not.
+    //
+    // Packet budget after the fix:
+    //   Primary  (ADV_IND): 3 B flags + 18 B 128-bit UUID  = 21 B (≤31 ✓)
+    //   Scan response:       9 B "A1Keyer" name             =  9 B (≤31 ✓)
     NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
-    adv->addServiceUUID(kNusServiceUuid);
-    adv->setName(_deviceName);
-    adv->enableScanResponse(true);
-    // Default advertisement type is BLE_HCI_ADV_TYPE_ADV_IND
-    // (connectable undirected), which is what we want — NimBLE-Arduino
-    // does not expose a setAdvertisementType() setter, only the data
-    // payload.
+    adv->enableScanResponse(true);           // must be first — see above
+    adv->addServiceUUID(kNusServiceUuid);    // → primary ADV_IND packet
+    adv->setName(_deviceName);              // → scan response (m_scanResp=true)
+    // 160 × 0.625 ms = 100 ms advertising interval.  The NimBLE default
+    // (itvl=0 → controller-chosen, often 1.28 s on ESP-IDF 5.x) is too
+    // slow for macOS's BLE scanner and can cause the device to be missed
+    // entirely in a normal scan window.
+    adv->setAdvertisingInterval(160);
 
     _initialised = true;
     ble_nus_internal::setState(State::Off);

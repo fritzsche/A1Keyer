@@ -613,6 +613,70 @@ guessing.
 > better transport for desktop WinKeyer host software. BLE is kept for
 > phone/tablet clients; see the transport discussion for the split.
 
+## 8c. FIXED — macOS / Linux not seeing device (advertising call-order bug, 2026-08-02)
+
+**Status: fixed in `src/ble_nus_esp32.cpp`.** After §8b freed the heap,
+the device became visible on Windows but remained invisible on macOS and
+Linux/BlueZ.
+
+### Root cause
+
+NimBLE-Arduino 2.x's `NimBLEAdvertising::setName()` checks the
+`m_scanResp` flag **at call time**. When the flag is `false`, the name
+is stored in `m_advData` (the primary ADV_IND packet). When `true`, it
+goes into `m_scanData` (the scan response packet). The old call order
+was:
+
+```cpp
+adv->addServiceUUID(kNusServiceUuid);  // m_scanResp = false here
+adv->setName(_deviceName);             // → primary ADV_IND packet
+adv->enableScanResponse(true);         // too late — m_scanData still empty
+```
+
+With the name in the primary packet and `m_scanData` empty, the scan
+response PDU was never transmitted (NimBLE-Arduino only sends the scan
+response when `m_scanData` is non-empty).
+
+macOS Core Bluetooth issues a `SCAN_REQ` for every connectable
+undirected (`ADV_IND`) peripheral and resolves the device name from the
+scan response. With no scan response, macOS never saw a name and
+silently discarded the device. Windows is more lenient — it reads the
+name from either the primary packet or the scan response — so the device
+appeared on Windows but not macOS. Linux / BlueZ behaves like macOS.
+
+### Fix (`src/ble_nus_esp32.cpp`)
+
+Move `enableScanResponse(true)` before `addServiceUUID` and `setName`,
+and add an explicit 100 ms advertising interval:
+
+```cpp
+NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
+adv->enableScanResponse(true);        // must be first — routes name to scan response
+adv->addServiceUUID(kNusServiceUuid); // → primary ADV_IND (21 B total, ≤31 ✓)
+adv->setName(_deviceName);           // → scan response (9 B, ≤31 ✓)
+adv->setAdvertisingInterval(160);    // 160 × 0.625 ms = 100 ms
+```
+
+The advertising interval fix addresses a second macOS issue: the
+NimBLE-Arduino default of `itvl=0` lets the ESP-IDF controller choose
+the interval, which on ESP-IDF 5.x can be 1.28 s — long enough for
+macOS's short scan window to miss the device entirely.
+
+### Resulting packet layout
+
+| Packet | Contents | Size |
+|---|---|---|
+| Primary ADV_IND | Flags (3 B) + 128-bit NUS UUID (18 B) | 21 B |
+| Scan response | "A1Keyer" name (9 B) | 9 B |
+
+### OS compatibility
+
+| OS | Discovery mechanism | Result |
+|---|---|---|
+| macOS | `SCAN_REQ` → name from scan response | visible ✓ |
+| Windows | name from either packet | visible ✓ |
+| Linux / BlueZ | `SCAN_REQ` → name from scan response | visible ✓ |
+
 ## 9. References
 
 - `~/.platformio/packages/framework-arduinoespressif32/libraries/BLE/src/BLEDevice.cpp` —
