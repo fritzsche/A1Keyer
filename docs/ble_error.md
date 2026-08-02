@@ -733,50 +733,60 @@ exactly as Windows already did.
 > better transport for desktop WinKeyer host software. BLE is kept for
 > phone/tablet clients; see the transport discussion for the split.
 
-## 8d. FIXED — advertising packet layout: name must be in primary ADV_IND (2026-08-02)
+## 8d. FIXED — advertising packet layout: explicit raw packet construction (2026-08-02)
 
 **Status: fixed in `src/ble_nus_esp32.cpp`.**
 
 ### Symptom
 
-After the §8c static-random address fix, Windows showed the device as
-"Unknown Device" and macOS remained invisible.
+After the §8c static-random address fix, Windows showed "Unknown Device"
+and macOS remained invisible in Bluetooth Settings.
 
-### Root cause
+### What the serial log revealed
 
-The previous advertising setup (added during the §8c work) put the
-device name in the **scan response** and the NUS UUID in the primary
-ADV_IND packet:
-
-```cpp
-adv->enableScanResponse(true);
-adv->addServiceUUID(kNusServiceUuid);  // → primary
-adv->setName(_deviceName);            // → scan response (m_scanResp=true)
+```
+D NimBLEAdvertising: setAdvertisementData: 02 01 06 11 07 9e ca dc 24 0e e5 a9 e0 93 f3 a3 b5 01 00 40 6e
+D NimBLEAdvertising: setScanResponseData: 08 09 41 31 4b 65 79 65 72
 ```
 
-Windows resolves the display name from AD type 0x09 (Complete Local
-Name) in the **primary ADV_IND** packet. It does not always issue a
-`SCAN_REQ` before caching the display name, so with the name only in
-the scan response it showed "Unknown Device". macOS issues `SCAN_REQ`
-but its System Settings pane requires the name in the primary packet for
-the initial display — without it the device was invisible there too.
+Decoded:
+- Primary ADV_IND: `02 01 06` (flags) + `11 07 …` (128-bit UUID) — **no name**
+- Scan response: `08 09 41 31 4b 65 79 65 72` = AD type 0x09, "A1Keyer"
 
-### Fix
+NimBLE-Arduino 2.5.0's `addServiceUUID` always places UUIDs in the
+primary packet regardless of call order or `m_scanResp`. `setName` with
+`m_scanResp=true` routes the name to the scan response. The high-level
+helpers cannot be used to put the name in the primary packet and the UUID
+in the scan response — they override the intended layout internally.
 
-Name goes in the primary ADV_IND packet; UUID goes in the scan response:
+Windows reads the display name from AD type 0x09 in the **primary
+ADV_IND** packet before issuing `SCAN_REQ`. With the name only in the
+scan response it showed "Unknown Device". macOS System Settings also
+needs the name in the primary packet for the initial device list entry.
+
+### Fix — bypass the helpers, build raw AD payloads directly
+
+Use `NimBLEAdvertisementData` to construct both packets explicitly:
 
 ```cpp
+NimBLEAdvertisementData advData;
+advData.setFlags(BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP);
+advData.setName(_deviceName);            // AD 0x09 → primary packet
+
+NimBLEAdvertisementData scanData;
+scanData.addServiceUUID(kNusServiceUuid); // AD 0x07 → scan response
+
 NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
-adv->enableScanResponse(true);
-adv->setName(_deviceName);             // → primary ADV_IND (AD 0x09)
-adv->addServiceUUID(kNusServiceUuid);  // → scan response (overflow fallback)
-adv->setAdvertisingInterval(160);      // 100 ms
+adv->setAdvertisementData(advData);
+adv->setScanResponseData(scanData);
+adv->setAdvertisingInterval(160);        // 100 ms
 ```
 
-`addServiceUUID` tries the primary packet first; with name (9 B) +
-flags (3 B) = 12 B already there, the 128-bit UUID (18 B) still fits
-(total 30 B ≤ 31 B). Routing it to the scan response via overflow keeps
-the primary packet lean.
+Expected serial log after fix:
+```
+D NimBLEAdvertising: setAdvertisementData: 02 01 06 08 09 41 31 4b 65 79 65 72
+D NimBLEAdvertising: setScanResponseData: 11 07 9e ca dc 24 0e e5 a9 e0 93 f3 a3 b5 01 00 40 6e
+```
 
 ### Resulting packet layout
 
