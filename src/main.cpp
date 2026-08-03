@@ -9,6 +9,7 @@
 #define A1KEYER_VERSION "0.1.0"
 #include <M5Unified.h>
 #include <Preferences.h>
+#include <driver/gpio.h>
 #include "audio_engine.h"
 #include "morse_generator.h"
 #include "morse_encoder.h"
@@ -22,6 +23,7 @@
 #include "key_event_bus.h"
 #include "radio_keyer.h"
 #include "winkey.h"
+#include "usb_reset.h"
 #ifdef BOARD_CARDPUTER
 #include "cardputer_display.h"
 #endif
@@ -299,6 +301,19 @@ static void handleKeyboard() {
 }
 
 void setup() {
+    // CRITICAL: release any GPIO0 hold set by the previous firmware
+    // (see src/usb_reset.cpp::enterDownloadMode). If we boot after
+    // an upload that triggered the auto-reset, the pin is being held
+    // LOW across the reset — without this call the chip would boot
+    // back into the ROM bootloader forever. Must be the FIRST thing
+    // in setup(), before any risky operation that could abort boot.
+    gpio_hold_dis(GPIO_NUM_0);
+
+    // Auto-reset into download mode on the esptool.py DTR/RTS dance
+    // and the Arduino IDE 1200-baud touch. Disables the framework's
+    // broken auto-reset path and registers our polling in loop().
+    UsbReset::begin();
+
     Serial.begin(115200);
     delay(500);
 
@@ -370,6 +385,12 @@ void setup() {
 }
 
 void loop() {
+    // Watch CDC0's DTR/RTS/baud for the esptool.py reset dance or
+    // the 1200-baud touch. Must run early each iteration so the
+    // detection has a chance to fire before any other work hogs the
+    // loop. See src/usb_reset.cpp.
+    UsbReset::poll();
+
     M5.update();
     handleKeyboard();
 

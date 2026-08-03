@@ -58,11 +58,15 @@ pio device monitor -b 115200                # watch [INFO]/[setup] logs
 `--port /dev/cu.usbmodemXXXX` (macOS/Linux) or `--port COMx` (Windows).
 
 > **Upload note (TinyUSB mode).** The firmware runs USB in TinyUSB mode
-> (`ARDUINO_USB_MODE=0`) so it can expose two CDC ports. Normal uploads
-> work as usual. Only if a build crashes very early in `setup()` (before
-> USB initialises) might the upload port not appear — recover by holding
-> **G0/BOOT** while pressing **RESET** to enter the ROM bootloader, then
-> upload once. This is rare, not a per-upload step.
+> (`ARDUINO_USB_MODE=0`) so it can expose two CDC ports. To make
+> `pio run -t upload` work without manual BOOT/Reset, `src/usb_reset.cpp`
+> runs an always-on DTR/RTS + 1200-baud watcher on CDC0: when the host
+> sends the esptool.py reset sequence (or the Arduino IDE's 1200-baud
+> touch), the firmware pulls GPIO0 LOW and calls `esp_restart()`. The
+> ROM bootloader then enumerates over USB-OTG, the upload port appears,
+> and the firmware flashes normally. Recovery: if a build crashes very
+> early in `setup()` before the watcher is registered, hold **G0/BOOT**
+> while pressing **RESET** to enter the ROM bootloader, then upload once.
 
 ---
 
