@@ -170,6 +170,10 @@ public:
     // appendDecodedChar writes at _textHead, then advances head.
     // renderScrollingText reads starting at _textTail for length _textLen.
 
+    /// Maximum decoded-text capacity. Public so external readers (e.g.
+    /// the HTTP /state handler) can iterate the circular buffer.
+    static constexpr size_t TEXT_BUF_SIZE = 200;
+
     /**
      * decodedText — raw pointer to the text buffer.
      *
@@ -506,7 +510,8 @@ private:
     std::atomic<KeyerType> _keyerType{KeyerType::PADDLE};
 
     // Decoded text — circular buffer (200 chars)
-    static constexpr size_t TEXT_BUF_SIZE = 200;
+    // TEXT_BUF_SIZE is declared in the public section above so external
+    // readers (e.g. the HTTP /state handler) can iterate the ring.
     char _textBuf[TEXT_BUF_SIZE]{0};
 
     // Per-character attributes (K=keyer, P=player) — parallel to _textBuf

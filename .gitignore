@@ -7,3 +7,6 @@ build/
 CMakeCache.txt
 CMakeFiles/
 extern/
+
+# Local WiFi credentials — copy from src/secrets_template.h
+src/secrets.h

@@ -11,6 +11,9 @@
 
 #include <Arduino.h>
 #include <cstdio>
+#if ENABLE_WIFI_DEBUG
+#include "log_ring.h"
+#endif
 
 namespace {
 
@@ -122,6 +125,13 @@ void Console::write(uint8_t byte) {
         ringPush(byte);
         portEXIT_CRITICAL(&_mux);
     }
+#if ENABLE_WIFI_DEBUG
+    // Passive tap for the HTTP /log endpoint. Mirrors every byte that
+    // reaches the wire (or the WinKey replay ring) into LogRing. Kept
+    // outside the critical section above for the same reason
+    // ringReplay() is — see the comment above ringReplay().
+    LogRing::instance().write(byte);
+#endif
 }
 
 void Console::write(const uint8_t* data, size_t len) {
@@ -132,6 +142,9 @@ void Console::write(const uint8_t* data, size_t len) {
         for (size_t i = 0; i < len; ++i) ringPush(data[i]);
         portEXIT_CRITICAL(&_mux);
     }
+#if ENABLE_WIFI_DEBUG
+    for (size_t i = 0; i < len; ++i) LogRing::instance().write(data[i]);
+#endif
 }
 
 void Console::vprintf(const char* fmt, va_list args) {

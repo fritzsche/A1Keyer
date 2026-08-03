@@ -27,6 +27,9 @@ set(LIB_SOURCES
     src/radio_keyer.cpp
     src/winkey_bridge.cpp
     src/console_io.cpp
+    src/wifi_debug.cpp
+    src/console_server.cpp
+    src/winkey.cpp
 )
 
 # ---------------------------------------------------------------------------
@@ -45,6 +48,7 @@ foreach(SUITE IN ITEMS
     test_key_event_bus
     test_radio_keyer
     test_winkey_bridge
+    test_log_ring
 )
     add_executable(${SUITE}
         test/${SUITE}/${SUITE}.cpp

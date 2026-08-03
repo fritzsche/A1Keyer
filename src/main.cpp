@@ -24,6 +24,10 @@
 #include "radio_keyer.h"
 #include "winkey.h"
 #include "console_io.h"
+#if ENABLE_WIFI_DEBUG
+#include "wifi_debug.h"
+#include "console_server.h"
+#endif
 #ifdef BOARD_CARDPUTER
 #include "cardputer_display.h"
 #endif
@@ -388,11 +392,35 @@ void setup() {
 
     Log::info("A1Keyer v%s", A1KEYER_VERSION);
     Log::info("Ready.");
+
+#if ENABLE_WIFI_DEBUG
+    // Dev-only network console. Bring up WiFi (with the credentials in
+    // git-ignored src/secrets.h), wait briefly for association, then
+    // start the HTTP server. See docs/net-debug.md (future).
+    WifiDebug::begin();
+    if (WifiDebug::isConnected() ||
+        WiFi.waitForConnectResult(5000) == WL_CONNECTED) {
+        ConsoleServer::begin(80);
+        IPAddress ip(WifiDebug::localIP());
+        Log::info("[net] HTTP console on http://%u.%u.%u.%u/",
+                  ip[0], ip[1], ip[2], ip[3]);
+    } else {
+        Log::warning("[net] WiFi not connected, HTTP console disabled");
+    }
+#endif
 }
 
 void loop() {
     M5.update();
     handleKeyboard();
+
+#if ENABLE_WIFI_DEBUG
+    // Service the dev network console. Both calls are no-ops when WiFi
+    // is down, so this stays cheap even in shipping builds (the gate
+    // compiles out entirely when ENABLE_WIFI_DEBUG=0).
+    WifiDebug::poll();
+    ConsoleServer::poll();
+#endif
 
     // Service the WinKeyer stream (host logger → keying), only in WinKey mode.
     Winkey::poll();

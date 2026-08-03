@@ -98,9 +98,14 @@ void Winkey::poll() {
     _bridge.poll();
 }
 
+const WinkeyBridge* Winkey::bridge() {
+    return &_bridge;
+}
+
 #else  // UNIT_TEST — no-op stubs
 
 void Winkey::begin() {}
 void Winkey::poll() {}
+const WinkeyBridge* Winkey::bridge() { return nullptr; }
 
 #endif  // UNIT_TEST
