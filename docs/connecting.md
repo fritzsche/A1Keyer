@@ -68,9 +68,14 @@ pio device monitor -b 115200                # watch [INFO]/[setup] logs
 > than the running app's CDC0. `platformio.ini` sets
 > `board_upload.wait_for_upload_port = yes` so PlatformIO rescans and
 > follows that new port — without it, esptool waits on the old port name
-> and fails with "No serial data received". Recovery: if a build ever
-> crashes very early in `setup()`, hold **G0/BOOT** while pressing
-> **RESET** to enter the ROM bootloader, then upload once.
+> and fails with "No serial data received". After flashing, `platformio.ini`
+> sets `--after=watchdog_reset` so the chip cleanly reboots into the app
+> (a plain hard-reset can leave it on the JTAG controller, so the two
+> TinyUSB CDC ports would not re-appear until you pressed RESET). With the
+> watchdog reset, both ports (console + WinKeyer) come back automatically
+> a second or two after upload. Recovery: if a build ever crashes very
+> early in `setup()`, hold **G0/BOOT** while pressing **RESET** to enter
+> the ROM bootloader, then upload once.
 >
 > **Design note.** The S3's single USB PHY is muxed between the USB-OTG
 > controller (TinyUSB, our two CDC ports) and the hardware USB-Serial-JTAG
