@@ -1,127 +1,82 @@
 # Connecting to A1Keyer
 
-A1Keyer connects to a computer over **USB-C**. With a single cable the
-firmware presents **two independent serial ports** (a TinyUSB composite
-device):
+A1Keyer connects to a computer over a **single USB-C serial port**
+(hardware USB-Serial-JTAG). That one port serves two runtime modes,
+switched on the device with the **'D' key**:
 
-| Port | Purpose | Speed |
+| Mode | Purpose | Default |
 |---|---|---|
-| **CDC0** | Firmware upload, `pio device monitor`, debug logs (`[INFO]…`) | 115200 |
-| **CDC1** | WinKeyer 2.x interface for logging software (RUMlogNG, N1MM, fldigi) | any |
+| **Console** (dev) | Firmware upload, `pio device monitor`, debug logs | ✅ |
+| **WinKey** | Speaks the K1EL WinKeyer WK2 protocol for a logger (RUMlogNG, N1MM, fldigi) | |
 
-Both appear from one USB-C cable — on macOS as two `/dev/cu.usbmodem*`
-devices, on Windows as two `COMx` ports, on Linux as two `/dev/ttyACM*`.
+Press **D** on the Cardputer keyboard to toggle. The status line shows
+a **`WK`** tag (accent colour) while in WinKey mode.
 
-> **Bluetooth note.** Earlier firmware experimented with BLE. It was
-> removed: BLE is not an OS-level serial port on any platform (a BLE
-> peripheral never becomes a COM port / `/dev/tty`), so logging software
-> could not use it. USB CDC is the transport. The historical BLE
-> investigation is kept in `docs/ble_error.md` for reference only.
-
----
-
-## Identifying the two ports
-
-Plug in the Cardputer, then:
-
-### macOS
-```bash
-ls /dev/cu.usbmodem*
-# e.g. /dev/cu.usbmodem1101   /dev/cu.usbmodem1103
-```
-The two entries are CDC0 and CDC1. The lower-numbered one is usually
-CDC0 (upload/monitor); if unsure, open one in a terminal — the port that
-prints `[INFO]`/`[setup]` log lines at boot is CDC0.
-
-### Windows
-Open **Device Manager → Ports (COM & LPT)**. Two `USB Serial Device
-(COMx)` entries appear. The one that streams boot log text is CDC0.
-
-### Linux
-```bash
-ls /dev/ttyACM*
-# e.g. /dev/ttyACM0  /dev/ttyACM1
-```
+> **Why one port + a toggle** (not two ports): the ESP32-S3 has a single
+> USB PHY shared between the USB-OTG controller and the hardware
+> USB-Serial-JTAG controller — only one runs at a time. Using hardware
+> JTAG gives rock-solid uploads (the normal ESP32-S3 path) but only one
+> serial port, so the WinKeyer interface time-shares that port via the
+> mode toggle. (An earlier two-port TinyUSB design made flashing
+> fragile; see git history / `docs/ble_error.md` for the BLE detour.)
 
 ---
 
-## CDC0 — upload, monitor, and debug logs
+## Finding the port
 
-This is the normal PlatformIO workflow — unchanged from before:
+Plug in the Cardputer:
 
-```bash
-pio run -e esp32s3_cardputer -t upload      # flash firmware
-pio device monitor -b 115200                # watch [INFO]/[setup] logs
-```
+- **macOS:** `ls /dev/cu.usbmodem*` → one entry, e.g. `/dev/cu.usbmodem1101`
+- **Windows:** Device Manager → Ports (COM & LPT) → one `USB Serial Device (COMx)`
+- **Linux:** `ls /dev/ttyACM*` → `/dev/ttyACM0`
 
-`pio device monitor` auto-selects CDC0. If it picks the wrong port, pass
-`--port /dev/cu.usbmodemXXXX` (macOS/Linux) or `--port COMx` (Windows).
-
-> **Upload note (TinyUSB mode).** The firmware runs USB in TinyUSB mode
-> (`ARDUINO_USB_MODE=0`) so it can expose two CDC ports. Firmware upload
-> relies on the arduino-esp32 core's built-in USB auto-reset: when
-> esptool toggles DTR/RTS on CDC0, the core calls
-> `usb_persist_restart(RESTART_BOOTLOADER)`, which resets the chip into
-> ROM download mode. On the S3 that switches the shared USB PHY from the
-> TinyUSB-OTG controller to the USB-Serial-JTAG ROM controller
-> (VID:PID `303a:1001`), which enumerates as a *different* serial port
-> than the running app's CDC0. `platformio.ini` sets
-> `board_upload.wait_for_upload_port = yes` so PlatformIO rescans and
-> follows that new port — without it, esptool waits on the old port name
-> and fails with "No serial data received". After flashing, `platformio.ini`
-> sets `--after=watchdog_reset` so the chip cleanly reboots into the app
-> (a plain hard-reset can leave it on the JTAG controller, so the two
-> TinyUSB CDC ports would not re-appear until you pressed RESET). With the
-> watchdog reset, both ports (console + WinKeyer) come back automatically
-> a second or two after upload. Recovery: if a build ever crashes very
-> early in `setup()`, hold **G0/BOOT** while pressing **RESET** to enter
-> the ROM bootloader, then upload once.
->
-> **Design note.** The S3's single USB PHY is muxed between the USB-OTG
-> controller (TinyUSB, our two CDC ports) and the hardware USB-Serial-JTAG
-> controller — only one runs at a time. So the two-port composite and the
-> zero-config JTAG upload path are mutually exclusive on one cable;
-> `wait_for_upload_port` is the standard way to keep TinyUSB uploads
-> reliable. Using hardware JTAG (`ARDUINO_USB_MODE=1`) for stable uploads
-> would give up the second CDC port.
+There is only one port in every mode — the mode changes what the port
+*speaks*, not how many ports exist.
 
 ---
 
-## CDC1 — WinKeyer 2.x interface
+## Console mode (default) — upload, monitor, debug
 
-CDC1 speaks the K1EL WinKeyer WK2 protocol (see `docs/winkey.md`). Point
-your logging software's WinKeyer/CW settings at the **second** serial
-port.
+Normal PlatformIO workflow, no manual steps:
 
-### RUMlogNG (macOS)
+```bash
+pio run -e esp32s3_cardputer -t upload   # flash firmware
+pio device monitor -b 115200             # watch [INFO]/[setup] logs
+```
 
-1. Flash the firmware and connect the Cardputer over USB-C.
-2. In RUMlogNG → **Preferences → CW/WinKeyer** (or the CW keyer settings),
-   select the WinKeyer device and choose the CDC1 port
-   (`/dev/cu.usbmodem*` — the one that is *not* printing debug logs).
-3. RUMlogNG performs the WinKeyer host-open handshake; A1Keyer replies
-   with version `0x06` (WK2). Set your speed; sending CW from RUMlogNG
-   now keys A1Keyer.
+Uploads use the hardware USB-Serial-JTAG bootloader — no BOOT/RESET
+button dance, no port-switch issues.
 
-### N1MM+ / fldigi / other loggers (Windows/Linux)
+---
 
-Same idea: in the WinKeyer configuration, select CDC1's COM port
-(`COMx`) / `/dev/ttyACM1`. The device identifies as a WK2 keyer.
+## WinKey mode — driving CW from a logger
 
-### Quick manual check (no logger needed)
+1. Flash + connect over USB-C (Console mode).
+2. On the Cardputer, press **D** → status line shows `WK`. The serial
+   port now speaks the WinKeyer WK2 protocol; debug output is silently
+   buffered (not written to the wire) so it can't corrupt the protocol.
+3. In your logger's WinKeyer/CW settings, select the **same** serial
+   port and connect:
+   - **RUMlogNG (macOS):** Preferences → CW/WinKeyer → pick the
+     `/dev/cu.usbmodem*` device. It performs the host-open handshake;
+     A1Keyer replies with WK2 version `0x17`. Set speed and send CW.
+   - **N1MM+ / fldigi (Windows/Linux):** select the COM port /
+     `/dev/ttyACM0` in the WinKeyer config.
+4. Press **D** again to return to Console mode. Any debug output that
+   occurred during the WinKey session is **replayed** to the terminal
+   (bracketed by `--- N buffered log bytes ---`).
 
-Any serial terminal can exercise the handshake. Open CDC1 and send the
-host-open bytes `0x00 0x02`; the device echoes them and replies `0x06`.
-`docs/winkey.md § 5` documents the full sequence, and
-`scripts/winkey_host.py` (a Python test utility, if present) automates it.
+> Close the logger's serial connection (or just switch back to Console
+> mode) before running `pio device monitor` — one host program owns the
+> port at a time.
 
 ---
 
 ## Radio keying
 
 When A1Keyer keys CW (from the paddle, straight key, or a WinKeyer
-message), it drives the PC817 optocoupler output to key a real
+message) it drives the PC817 optocoupler output to key a real
 transceiver — **only** if the operator has turned KEYING on in the
-device settings. A host's WinKeyer "output enable" cannot re-enable RF
+device settings. A host's WinKeyer output-enable cannot re-enable RF
 that the operator disabled locally. See `docs/keyer.md` and
 `docs/winkey.md § 16.4`.

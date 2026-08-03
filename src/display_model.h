@@ -141,6 +141,19 @@ public:
      */
     void setRadioKeyingEnabled(bool enabled);
 
+    // ─── WinKey / Console mode indicator ───────────────────────────────────
+
+    /**
+     * winkeyMode — true when the serial line is in WinKey mode (speaking
+     * the WinKeyer protocol to a host logger), false in Console/dev mode.
+     * Mirrors Console::mode() so the display task can render an indicator
+     * without depending on the Console module. Toggled by the 'D' key.
+     */
+    bool winkeyMode() const;
+
+    /** Set the WinKey/Console mode indicator (mirror of Console::mode()). */
+    void setWinkeyMode(bool on);
+
     // ─── Decoded text (circular buffer) ────────────────────────────────────
     // The circular buffer holds TEXT_BUF_SIZE (200) characters of decoded morse.
     // Three atomic pointers manage it:
@@ -513,6 +526,9 @@ private:
 
     // Radio keying output (default OFF for safety — must be user-enabled)
     std::atomic<bool> _radioKeyingEnabled{false};
+
+    // WinKey/Console mode indicator (default false = Console/dev mode)
+    std::atomic<bool> _winkeyMode{false};
 
     // Keyer pattern percentage — written by audio thread
     std::atomic<int> _keyerPct{0};

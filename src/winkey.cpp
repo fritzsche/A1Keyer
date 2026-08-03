@@ -2,8 +2,9 @@
  * winkey.cpp — device-side WinKeyer facade (glue).
  *
  * Device build: wires WinkeyBridge callbacks to MorseModel / AudioEngine
- * / MorseGenerator, streams the bridge's output bytes back over CDC1,
- * and pumps received bytes in poll(). Host (UNIT_TEST) build: no-op.
+ * / MorseGenerator, streams the bridge's output bytes back over the shared
+ * serial line (WinKey mode only), and pumps received bytes in poll(). Host
+ * (UNIT_TEST) build: no-op.
  */
 #include "winkey.h"
 
@@ -11,6 +12,7 @@
 
 #include "winkey_bridge.h"
 #include "winkey_serial.h"
+#include "console_io.h"
 #include "display_model.h"
 #include "audio_engine.h"
 #include "morse_generator.h"
@@ -20,7 +22,7 @@ namespace {
 
 WinkeyBridge _bridge;
 
-// ─── Bridge output sink: bytes toward the host go out on CDC1. ──────────
+// ─── Bridge output sink: bytes toward the host go out the serial line. ──
 void wkOut(uint8_t byte, void* /*ctx*/) {
     WinkeySerial::write(byte);
 }
@@ -76,12 +78,17 @@ void Winkey::begin() {
     cb.stopSending     = &cbStopSending;
     cb.ctx             = nullptr;
     _bridge.begin(&wkOut, nullptr, cb);
-    Log::info("[WK] WinkeyBridge ready on CDC1");
+    Log::info("[WK] WinkeyBridge ready (press 'D' to enter WinKey mode)");
 }
 
 void Winkey::poll() {
-    // Drain everything CDC1 has buffered this cycle, then run bridge
-    // housekeeping (buffer playback).
+    // Only parse serial bytes as WinKeyer protocol while in WinKey mode.
+    // In Console mode the same serial line carries the debug console /
+    // terminal input, which must NOT be fed to the bridge.
+    if (Console::mode() != Console::Mode::WinKey) return;
+
+    // Drain everything the serial line has buffered this cycle, then run
+    // bridge housekeeping (send-buffer playback).
     int guard = 256;  // bound work per loop() so we never starve the loop
     while (WinkeySerial::available() > 0 && guard-- > 0) {
         int b = WinkeySerial::read();

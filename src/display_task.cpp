@@ -1,5 +1,6 @@
 #include "display_task.h"
 #include "display_model.h"
+#include "Log.h"
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -79,7 +80,7 @@ void DisplayTask::begin(DisplayInterface* display) {
                 // exactly one render.
                 if (displayActive && (cur != lastCounter || !lastDisplayActive)) {
                     uint32_t now = millis();
-                    Serial.printf("[DSP] *** RENDER t=%u counter=%u active=%d wakeArmed=%d ***\n",
+                    Log::debug("[DSP] *** RENDER t=%u counter=%u active=%d wakeArmed=%d ***",
                         now, cur, (int)displayActive, (int)wakeArmed);
                     lastCounter = cur;
                     disp->render();

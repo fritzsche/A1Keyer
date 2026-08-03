@@ -1,4 +1,5 @@
 #include "morse_encoder.h"
+#include "Log.h"
 #include <Arduino.h>
 #include <cstdio>
 #include <cstring>
@@ -231,15 +232,13 @@ std::vector<MorseEncoder::Element> MorseEncoder::encode(const char* text) const 
 // ---------------------------------------------------------------------------
 void MorseEncoder::debugPrint(const char* text) {
     if (!text) return;
-    Serial.print("[morse] \"");
-    Serial.print(text);
-    Serial.print("\" -> \"");
+    Log::write("[morse] \"%s\" -> \"", text);
     while (*text) {
         char c = *text;
-        if (c == ' ') { Serial.print(" / "); ++text; continue; }
+        if (c == ' ') { Log::write(" / "); ++text; continue; }
         const char* code = morseFromChar(c);
-        if (code) Serial.print(code);
+        if (code) Log::write("%s", code);
         ++text;
     }
-    Serial.println("\"");
+    Log::write("\"\r\n");
 }

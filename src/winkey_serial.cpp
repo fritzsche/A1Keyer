@@ -1,65 +1,54 @@
 /**
- * winkey_serial.cpp — second USB-CDC interface (CDC1) for WinkeyBridge.
+ * winkey_serial.cpp — WinKeyer transport over the shared USB serial line.
  *
- * Device build: owns a USBCDC instance bound to TinyUSB interface index
- * 1. Interface 0 is the boot CDC the arduino-esp32 core auto-creates and
- * maps to `Serial` (ARDUINO_USB_CDC_ON_BOOT=1), used for upload +
- * monitor + Log.h. We take interface 1 for the WinKeyer byte stream.
+ * A1Keyer uses ONE hardware USB-Serial-JTAG port for both the debug
+ * console and the WinKeyer protocol, switched by the 'D' key (see
+ * console_io.h). This transport therefore reads and writes the SAME
+ * `Serial` the console uses, through the Console mode gate:
  *
- * Host (UNIT_TEST) build: no-op stubs so the link surface stays intact
- * without the ESP32 USB stack.
+ *   - RX: Console::available()/read() return raw serial bytes. The caller
+ *     (Winkey::poll) only feeds them to the bridge while in WinKey mode,
+ *     so terminal keystrokes in Console mode are never parsed as WK bytes.
+ *   - TX: Console::rawWinkeyWrite() writes real bytes to the wire even in
+ *     WinKey mode (the one path allowed to, so the WK2 stream stays clean).
  *
- * NOTE on the init sequence: with ARDUINO_USB_CDC_ON_BOOT=1 the core has
- * already called USB.begin() before setup() runs, so we only construct
- * and begin() the second CDC here. If a future build sets CDC_ON_BOOT=0,
- * an explicit USB.begin() would be needed before the first CDC's begin().
+ * Host (UNIT_TEST) build: no-op stubs.
  */
 #include "winkey_serial.h"
 
 #ifndef UNIT_TEST
 
-#include <USB.h>
-#include <USBCDC.h>
-
-namespace {
-// TinyUSB CDC interface index 1 (index 0 is the boot `Serial`). Requires
-// CFG_TUD_CDC >= 2 in the build flags — see platformio.ini.
-USBCDC _cdc1(1);
-bool   _ready = false;
-}  // namespace
+#include "console_io.h"
 
 void WinkeySerial::begin() {
-    if (_ready) return;
-    _cdc1.begin();
-    _ready = true;
+    // The serial line is already up (Console::begin in setup()); nothing
+    // to do here. Kept for API symmetry.
 }
 
 int WinkeySerial::available() {
-    if (!_ready) return 0;
-    return _cdc1.available();
+    return Console::available();
 }
 
 int WinkeySerial::read() {
-    if (!_ready) return -1;
-    return _cdc1.read();
+    return Console::read();
 }
 
 int WinkeySerial::write(uint8_t byte) {
-    if (!_ready || !_cdc1) return 0;  // operator bool() → CDC line open
-    return (int)_cdc1.write(byte);
+    Console::rawWinkeyWrite(byte);
+    return 1;
 }
 
 size_t WinkeySerial::write(const uint8_t* data, size_t len) {
-    if (!_ready || !_cdc1) return 0;
-    return _cdc1.write(data, len);
+    for (size_t i = 0; i < len; ++i) Console::rawWinkeyWrite(data[i]);
+    return len;
 }
 
 void WinkeySerial::flush() {
-    if (_ready) _cdc1.flush();
+    // Console owns Serial; a flush isn't needed for correctness here.
 }
 
 bool WinkeySerial::isReady() {
-    return _ready;
+    return true;
 }
 
 #else  // UNIT_TEST — host stubs

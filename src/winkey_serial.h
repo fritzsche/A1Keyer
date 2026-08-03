@@ -1,24 +1,23 @@
 #pragma once
 /**
- * winkey_serial.h — second USB-CDC transport for the WinKeyer bridge.
+ * winkey_serial.h — WinKeyer transport over the shared USB serial line.
  *
- * The firmware runs as a TinyUSB composite device with TWO CDC-ACM
- * interfaces (ARDUINO_USB_MODE=0, CFG_TUD_CDC=2 in platformio.ini):
+ * A1Keyer uses ONE hardware USB-Serial-JTAG port (ARDUINO_USB_MODE=1) for
+ * both the debug console and the WinKeyer protocol, switched by the 'D'
+ * key. This module is a thin byte-pipe over that same `Serial`, routed
+ * through the Console mode gate (src/console_io.h):
  *
- *   CDC0  →  Arduino `Serial`  — firmware upload, `pio device monitor`,
- *            and Log.h debug output. Untouched by this module.
- *   CDC1  →  WinkeySerial       — the raw WinKeyer 2.x byte stream a host
- *            logger (e.g. RUMlogNG on macOS) opens as a second serial
- *            port. This module owns that interface.
+ *   - available()/read() — raw serial RX (the caller, Winkey::poll, only
+ *     feeds these to the bridge while in WinKey mode).
+ *   - write()            — via Console::rawWinkeyWrite(), the one path
+ *     allowed to write real bytes to the wire in WinKey mode, so the WK2
+ *     stream is never polluted by log output.
  *
- * WinkeySerial is a thin byte-pipe: available()/read()/write()/flush().
  * The protocol logic lives in WinkeyBridge, which is transport-agnostic
- * (it takes bytes via feed() and emits via an output callback) so it can
- * be unit-tested on the host with no USB dependency. See docs/winkey.md
- * § 4.4 and § 16.
+ * (bytes in via feed(), bytes out via an OutputFn), so it is unit-tested
+ * on the host with no USB dependency. See docs/winkey.md § 4.4 and § 16.
  *
- * On host unit-test builds (UNIT_TEST) every method is a no-op stub so
- * the symbol surface stays linkable without the ESP32 USB stack.
+ * On host unit-test builds (UNIT_TEST) every method is a no-op stub.
  */
 #include <stdint.h>
 #include <stddef.h>

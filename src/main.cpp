@@ -23,7 +23,7 @@
 #include "key_event_bus.h"
 #include "radio_keyer.h"
 #include "winkey.h"
-#include "usb_reset.h"
+#include "console_io.h"
 #ifdef BOARD_CARDPUTER
 #include "cardputer_display.h"
 #endif
@@ -48,16 +48,17 @@ static void handleKeyboard() {
 
     static int dbg = 0;
     if (kb.keyList().size() > 0 && (++dbg % 50 == 0)) {
-        Serial.printf("[KB] keys: ");
+        Log::write("[KB] keys: ");
         for (auto& k : kb.keyList()) {
             char c = kb.getKey(k);
-            Serial.printf("%c(0x%02X) ", c >= 32 ? c : '?', (unsigned char)c);
+            Log::write("%c(0x%02X) ", c >= 32 ? c : '?', (unsigned char)c);
         }
-        Serial.println();
+        Log::write("\r\n");
     }
 
     static bool wasW = false, wasF = false, wasP = false, wasV = false, wasM = false;
     static bool wasK = false;
+    static bool wasD = false;
     static bool wasEnter = false, wasShift = false;
     static bool wasBtnA = false;
     static bool wasSemicolon = false, wasPeriod = false;
@@ -74,6 +75,7 @@ static void handleKeyboard() {
     bool vKey       = kb.isKeyPressed('V') || kb.isKeyPressed('v');
     bool mKey       = kb.isKeyPressed('M') || kb.isKeyPressed('m');
     bool kKey       = kb.isKeyPressed('K') || kb.isKeyPressed('k');
+    bool dKey       = kb.isKeyPressed('D') || kb.isKeyPressed('d');
     bool enter      = kb.isKeyPressed(KEY_ENTER);
     bool shift      = kb.keysState().shift;
     bool btnA       = M5Cardputer.BtnA.isPressed();
@@ -84,7 +86,7 @@ static void handleKeyboard() {
 
     // W → WPM settings (toggle).
     if (wKey && !wasW) {
-        Serial.println("[KB] W pressed");
+        Log::write("[KB] W pressed\r\n");
         if (model.screen() == DisplayScreen::WPM_SETTINGS) {
             model.setScreen(DisplayScreen::DECODER);
         } else {
@@ -126,6 +128,20 @@ static void handleKeyboard() {
         }
         DisplayTask::requestRender();
     }
+
+    // D → toggle Console (development) mode ↔ WinKey mode. In WinKey mode
+    // the single USB serial port speaks the WinKeyer WK2 protocol to a
+    // host logger (RUMlogNG); debug output is buffered and replayed when
+    // switching back to Console mode. Default is Console mode.
+    if (dKey && !wasD) {
+        bool toWinkey = (Console::mode() != Console::Mode::WinKey);
+        Console::setMode(toWinkey ? Console::Mode::WinKey
+                                  : Console::Mode::Console);
+        model.setWinkeyMode(toWinkey);
+        Log::info("[MODE] %s", toWinkey ? "WinKey" : "Console");
+        DisplayTask::requestRender();
+    }
+    wasD = dKey;
 
     // K → keying settings (toggle On/Off radio output). Suppresses a
     // single follow-up press for hold-to-key so opening the overlay
@@ -247,35 +263,35 @@ static void handleKeyboard() {
             prefs.begin("morse", false);  // read-write
             prefs.putInt("wpm", model.wpm());
             prefs.end();
-            Serial.printf("[KB] saved WPM=%d to preferences\n", model.wpm());
+            Log::write("[KB] saved WPM=%d to preferences\n", model.wpm());
         }
         if (model.screen() == DisplayScreen::FREQ_SETTINGS) {
             Preferences prefs;
             prefs.begin("morse", false);  // read-write
             prefs.putInt("freq", (int)model.frequency());
             prefs.end();
-            Serial.printf("[KB] saved freq=%d to preferences\n", (int)model.frequency());
+            Log::write("[KB] saved freq=%d to preferences\n", (int)model.frequency());
         }
         if (model.screen() == DisplayScreen::VOLUME_SETTINGS) {
             Preferences prefs;
             prefs.begin("morse", false);  // read-write
             prefs.putInt("vol", model.volume());
             prefs.end();
-            Serial.printf("[KB] saved vol=%d to preferences\n", model.volume());
+            Log::write("[KB] saved vol=%d to preferences\n", model.volume());
         }
         if (model.screen() == DisplayScreen::MODE_SETTINGS) {
             Preferences prefs;
             prefs.begin("morse", false);  // read-write
             prefs.putString("keytype", model.keyerType() == KeyerType::PADDLE ? "paddle" : "straight");
             prefs.end();
-            Serial.printf("[KB] saved keyerType=%s\n", model.keyerType() == KeyerType::PADDLE ? "paddle" : "straight");
+            Log::write("[KB] saved keyerType=%s\n", model.keyerType() == KeyerType::PADDLE ? "paddle" : "straight");
         }
         if (model.screen() == DisplayScreen::KEYING_SETTINGS) {
             Preferences prefs;
             prefs.begin("morse", false);  // read-write
             prefs.putBool("keying", model.radioKeyingEnabled());
             prefs.end();
-            Serial.printf("[KB] saved keying=%d\n", model.radioKeyingEnabled() ? 1 : 0);
+            Log::write("[KB] saved keying=%d\n", model.radioKeyingEnabled() ? 1 : 0);
         }
         if (model.screen() != DisplayScreen::DECODER) {
             model.setScreen(DisplayScreen::DECODER);
@@ -301,11 +317,10 @@ static void handleKeyboard() {
 }
 
 void setup() {
-    // Ensure the framework's USB auto-reset (esptool DTR/RTS + 1200-baud
-    // touch → download mode) stays enabled on CDC0. See src/usb_reset.cpp.
-    UsbReset::begin();
-
-    Serial.begin(115200);
+    // Bring up the single USB serial line via the Console mode gate
+    // (hardware USB-Serial-JTAG). Console mode by default; the 'D' key
+    // toggles WinKey mode. See src/console_io.h.
+    Console::begin();
     delay(500);
 
     auto cfg = M5.config();
@@ -313,12 +328,12 @@ void setup() {
     M5.begin(cfg);
 
 #ifdef BOARD_CARDPUTER
-    Serial.printf("[setup] M5.getBoard() = %d\n", (int)M5.getBoard());
+    Log::write("[setup] M5.getBoard() = %d\n", (int)M5.getBoard());
     M5Cardputer.begin(true);
 #endif
 
     delay(500);
-    Serial.println("=== Morse Trainer ===");
+    Log::write("=== Morse Trainer ===\r\n");
 
     if (!AudioEngine::begin()) {
         Log::error("FATAL: AudioEngine::begin failed");
@@ -367,7 +382,7 @@ void setup() {
         // Apply the persisted keying setting AFTER RadioKeyer::begin() so
         // the GPIO is owned and ready. Default is Off (safe).
         model.setRadioKeyingEnabled(savedKeying);
-        Serial.printf("[setup] loaded WPM=%d freq=%d vol=%d keytype=%s keying=%d from preferences\n",
+        Log::write("[setup] loaded WPM=%d freq=%d vol=%d keytype=%s keying=%d from preferences\n",
             savedWpm, savedFreq, savedVol, savedKeyType.c_str(), savedKeying ? 1 : 0);
     }
 
@@ -376,16 +391,10 @@ void setup() {
 }
 
 void loop() {
-    // Watch CDC0's DTR/RTS/baud for the esptool.py reset dance or
-    // the 1200-baud touch. Must run early each iteration so the
-    // detection has a chance to fire before any other work hogs the
-    // loop. See src/usb_reset.cpp.
-    UsbReset::poll();
-
     M5.update();
     handleKeyboard();
 
-    // Service the WinKeyer USB CDC1 stream (host logger → keying).
+    // Service the WinKeyer stream (host logger → keying), only in WinKey mode.
     Winkey::poll();
 
 #ifdef BOARD_CARDPUTER

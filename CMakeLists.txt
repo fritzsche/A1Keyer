@@ -26,6 +26,7 @@ set(LIB_SOURCES
     src/key_event_bus.cpp
     src/radio_keyer.cpp
     src/winkey_bridge.cpp
+    src/console_io.cpp
 )
 
 # ---------------------------------------------------------------------------

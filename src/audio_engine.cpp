@@ -312,7 +312,7 @@ void AudioEngine::fillBuffer(int16_t* out, size_t stereoFrames) {
         // Iambic B keyer path — takes priority over MorseGenerator
         static int dbg = 0;
         if (++dbg % 100 == 0) {
-            Serial.printf("[AE] keyer path: hasMemory=%d isActive=%d\n", keyerHasMemory, s_keyer->isActive());
+            Log::debug("[AE] keyer path: hasMemory=%d isActive=%d", keyerHasMemory, s_keyer->isActive());
         }
         static int16_t mono[AUDIO_DMA_BUF_LEN];
         s_keyer->fillSamples(mono, stereoFrames,
@@ -326,7 +326,7 @@ void AudioEngine::fillBuffer(int16_t* out, size_t stereoFrames) {
         // MorseGenerator path — update encoder character for display
         static int dbg = 0;
         if (++dbg % 100 == 0) {
-            Serial.printf("[AE] morseGen playing: char=%c\n", s_morseGen->currentChar());
+            Log::debug("[AE] morseGen playing: char=%c", s_morseGen->currentChar());
         }
         MorseModel::instance().setEncoderChar(s_morseGen->currentChar());
         static int16_t mono[AUDIO_DMA_BUF_LEN];

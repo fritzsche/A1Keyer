@@ -243,31 +243,42 @@ with the command space (all ≤ 0x1F).
 
 ### 4.4 Transport in A1Keyer
 
-The WinkeyBridge is **transport-independent**: it sees a stream of bytes
-and writes a stream of bytes, and the transport underneath (USB-CDC,
-BLE-NUS) is a separate concern. A1Keyer's two targets:
+The WinkeyBridge is **transport-independent**: it takes a stream of bytes
+via `feed()` and emits via an `OutputFn` callback (`src/winkey_bridge.h`),
+so the byte-level protocol is unchanged regardless of the underlying pipe.
 
-- **Cardputer ADV (ESP32-S3).** Primary target. USB-CDC for development
-  (`ARDUINO_USB_CDC_ON_BOOT=1` in `platformio.ini`); BLE-NUS for
-  field use (ESP32-S3 has no Bluetooth Classic, only BLE; see
-  `docs/ARCHITECTURE.md § 2`).
-- **Tab5 (ESP32-P4).** Compiles-only target. Same transports.
+A1Keyer uses a **single hardware USB-Serial-JTAG port**
+(`ARDUINO_USB_MODE=1`) that time-shares between a debug console and the
+WinKeyer protocol, toggled by the **'D' key**. The ESP32-S3's single USB
+PHY is shared between USB-OTG and USB-Serial-JTAG, so two simultaneous
+ports over one connector isn't possible; using hardware JTAG gives
+reliable uploads and one port, and the mode toggle multiplexes it.
+
+- **Console mode (default):** all log output goes to the wire; the
+  WinkeyBridge is not fed serial RX.
+- **WinKey mode:** the WinkeyBridge reads/writes the port; log output is
+  captured into a RAM ring (`src/console_io.cpp`) and replayed to the
+  terminal on switching back, so no debug byte corrupts the WK2 stream.
 
 ```
-┌──────────┐    ┌──────────────────┐    ┌──────────────────┐
-│ Host     │    │  Winkey bytes    │    │  A1Keyer         │
-│ logger   │◄──►│  (transparent)   │◄──►│  WinkeyBridge    │
-│ (N1MM)   │    │                  │    │                  │
-└──────────┘    └──────────────────┘    └──────────────────┘
-       ▲                ▲                       ▲
-       │                │                       │
-   USB-CDC          BLE-NUS                KeyEventBus
-   /dev/tty.USB0    GATT char              (ref-counted)
-   COM5             notify/write           radio + sidetone
+                        'D' key toggles mode
+                                │
+┌──────────┐   one USB-C   ┌────┴─────────────┐    ┌──────────────────┐
+│ Host     │   serial port │  Console gate    │    │  WinkeyBridge    │
+│ logger   │◄─────────────►│  (console_io)    │◄──►│  (protocol core) │
+│ (RUMlog) │  /dev/cu.usb* │  Console|WinKey  │    │                  │
+└──────────┘   COMx        └────┬─────────────┘    └────────┬─────────┘
+                                │ Console mode:              │
+                                │ logs → wire                ▼
+                                │ WinKey mode:          KeyEventBus
+                                │ logs → ring (replay)  (radio + sidetone)
 ```
 
-The byte-level Winkey protocol is **unchanged** regardless of transport;
-BLE/USB wrappers are just stream-of-bytes pipes.
+- **Cardputer ADV (ESP32-S3).** Primary target (`platformio.ini`
+  `[env:esp32s3_cardputer]`, `ARDUINO_USB_MODE=1`, `LOG_SERIAL=1`).
+- **Tab5 (ESP32-P4).** Compiles-only target; same single-port model.
+
+See `docs/connecting.md` for the end-user connect/upload flow.
 
 ---
 

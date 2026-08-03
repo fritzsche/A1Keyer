@@ -1,5 +1,6 @@
 #include "morse_generator.h"
 #include "display_model.h"
+#include "Log.h"
 #ifndef UNIT_TEST
 #include <Arduino.h>
 #else
@@ -27,38 +28,38 @@ MorseGenerator::MorseGenerator(KeyEnvelop* env, int wpm)
 // Debug: dump envelope parameters and first/last samples to Serial
 // ---------------------------------------------------------------------------
 void MorseGenerator::debugDumpEnvelope() const {
-    if (!_env) { Serial.println("[MG] debugDumpEnvelope: no env"); return; }
+    if (!_env) { Log::write("[MG] debugDumpEnvelope: no env\r\n"); return; }
     int sr        = _env->sampleRate();
     int ditSamp   = _env->ditLengthSamples();
     int rampSamp  = (int)_env->rampLengthSamples();
     size_t ditEnvSz = _env->envelopeSize(KeyEnvelop::Element::DIT);
     size_t dahEnvSz = _env->envelopeSize(KeyEnvelop::Element::DAH);
 
-    Serial.printf("[MG] --- envelope dump (wpm=%d sr=%d) ---\n", _env->wpm(), sr);
-    Serial.printf("[MG]   dit_samples=%d  ramp_samples=%d\n", ditSamp, rampSamp);
-    Serial.printf("[MG]   dit_env_size=%u  dah_env_size=%u\n",
+    Log::write("[MG] --- envelope dump (wpm=%d sr=%d) ---\n", _env->wpm(), sr);
+    Log::write("[MG]   dit_samples=%d  ramp_samples=%d\n", ditSamp, rampSamp);
+    Log::write("[MG]   dit_env_size=%u  dah_env_size=%u\n",
                   (unsigned)ditEnvSz, (unsigned)dahEnvSz);
-    Serial.printf("[MG]   dit total ms=%.2f  dah total ms=%.2f\n",
+    Log::write("[MG]   dit total ms=%.2f  dah total ms=%.2f\n",
                   ditEnvSz * 1000.0f / sr, dahEnvSz * 1000.0f / sr);
 
     // Print first 8 and last 8 samples of DIT envelope to verify ramp shape
     const float* ditEnv = _env->envelope(KeyEnvelop::Element::DIT);
-    Serial.print("[MG]   DIT env[0..7]:  ");
+    Log::write("[MG]   DIT env[0..7]:  ");
     for (int i = 0; i < 8 && i < (int)ditEnvSz; ++i)
-        Serial.printf("%.3f ", ditEnv[i]);
-    Serial.println();
-    Serial.print("[MG]   DIT env[-8..-1]: ");
+        Log::write("%.3f ", ditEnv[i]);
+    Log::write("\r\n");
+    Log::write("[MG]   DIT env[-8..-1]: ");
     for (int i = (int)ditEnvSz - 8; i < (int)ditEnvSz; ++i)
-        Serial.printf("%.3f ", i >= 0 ? ditEnv[i] : 0.0f);
-    Serial.println();
+        Log::write("%.3f ", i >= 0 ? ditEnv[i] : 0.0f);
+    Log::write("\r\n");
 
     // Verify silence timing (no ramp correction needed — envelope is exactly 1 unit long)
     int elSpaceSamp   = ditSamp * 1;
     int charSpaceSamp = ditSamp * 3;
     int wordSpaceSamp = ditSamp * 7;
-    Serial.printf("[MG]   silence ELEMENT_SPACE=%d CHAR_SPACE=%d WORD_SPACE=%d samples\n",
+    Log::write("[MG]   silence ELEMENT_SPACE=%d CHAR_SPACE=%d WORD_SPACE=%d samples\n",
                   elSpaceSamp, charSpaceSamp, wordSpaceSamp);
-    Serial.println("[MG] --- end dump ---");
+    Log::write("[MG] --- end dump ---\r\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -74,11 +75,11 @@ void MorseGenerator::playText(const char* text) {
     _currentChar = text[0];
     _phase = 0.0f;  // reset sine phase so next tone starts at zero
     _phaseInc = 0.0f;
-    Serial.printf("[MG] playText: text=\"%s\" elements=%zu\n", text, (unsigned)_elements.size());
+    Log::write("[MG] playText: text=\"%s\" elements=%zu\n", text, (unsigned)_elements.size());
     MorseModel::instance().resetPlayerHead();  // fresh session, reset player color tracking
     // Do NOT clear the buffer — append to existing keyer text
     advanceToNextElement();
-    Serial.printf("[MG] after advance: currentChar='%c'(%d) isPlaying=%d\n",
+    Log::write("[MG] after advance: currentChar='%c'(%d) isPlaying=%d\n",
         (int)_currentChar >= 32 ? (int)_currentChar : '?',
         (int)(unsigned char)_currentChar,
         (int)(_state != State::IDLE));
@@ -99,7 +100,7 @@ void MorseGenerator::stop() {
 // Advance to the next element and set up its envelope/sample info
 // ---------------------------------------------------------------------------
 void MorseGenerator::advanceToNextElement() {
-    Serial.printf("[MG] advanceToNext: elIdx=%zu size=%zu charIdx=%zu/%zu char='%c'(%d)\n",
+    Log::write("[MG] advanceToNext: elIdx=%zu size=%zu charIdx=%zu/%zu char='%c'(%d)\n",
         (unsigned)_elIdx, (unsigned)_elements.size(),
         (unsigned)_charIdx, strlen(_playText),
         _charIdx < strlen(_playText) ? _playText[_charIdx] : '?',
@@ -111,7 +112,7 @@ void MorseGenerator::advanceToNextElement() {
         // _charIdx onwards (each was advanced past but never had a CHAR_SPACE).
         while (_charIdx < strlen(_playText)) {
             char c = _playText[_charIdx];
-            Serial.printf("[MG] boundary: appending char='%c' at idx=%zu\n",
+            Log::write("[MG] boundary: appending char='%c' at idx=%zu\n",
                 (unsigned char)c >= 32 ? (unsigned char)c : '?', (unsigned)_charIdx);
             MorseModel::instance().appendDecodedChar(c, true);
             ++_charIdx;
@@ -136,7 +137,7 @@ void MorseGenerator::advanceToNextElement() {
         // Always update _currentChar to the character whose mark we're playing.
         // This ensures the right char is captured at the boundary.
         _currentChar = _playText[_charIdx];
-        Serial.printf("[MG] mark: charIdx=%zu/%zu char='%c'(%d) elType=%d\n",
+        Log::write("[MG] mark: charIdx=%zu/%zu char='%c'(%d) elType=%d\n",
             (unsigned)_charIdx, strlen(_playText),
             (unsigned char)_currentChar >= 32 ? (unsigned char)_currentChar : '?',
             (unsigned char)_currentChar,
@@ -156,7 +157,7 @@ void MorseGenerator::advanceToNextElement() {
             if (_playText[_charIdx] != '\0') {
                 // Letter finished — append to shared decoded text buffer
                 uint32_t now = millis();
-                Serial.printf("[MG] APPEND t=%u char='%c' playPos=%zu/%zu\n",
+                Log::write("[MG] APPEND t=%u char='%c' playPos=%zu/%zu\n",
                     now,
                     (unsigned char)_currentChar >= 32 ? (unsigned char)_currentChar : '?',
                     (unsigned)_charIdx, strlen(_playText));

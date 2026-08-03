@@ -1,4 +1,5 @@
 #include "display_model.h"
+#include "Log.h"
 #ifndef UNIT_TEST
 #include "audio_engine.h"
 #include "radio_keyer.h"
@@ -56,6 +57,16 @@ void MorseModel::setRadioKeyingEnabled(bool enabled) {
     incrementChangeCounter();
 }
 
+bool MorseModel::winkeyMode() const {
+    return _winkeyMode.load(std::memory_order_relaxed);
+}
+
+void MorseModel::setWinkeyMode(bool on) {
+    bool prev = _winkeyMode.exchange(on, std::memory_order_relaxed);
+    if (prev == on) return;
+    incrementChangeCounter();
+}
+
 const char* MorseModel::decodedText() const {
     return _textBuf;
 }
@@ -96,7 +107,7 @@ void MorseModel::appendDecodedChar(char c, bool fromPlayer) {
         _playerHead.store(SIZE_MAX, std::memory_order_relaxed);
     }
     uint32_t newCounter = _changeCounter.fetch_add(1, std::memory_order_relaxed) + 1;
-    Serial.printf("[DM] APPEND char='%c' fromPlayer=%d counter=%u->%u head=%zu len=%zu\n",
+    Log::debug("[DM] APPEND char='%c' fromPlayer=%d counter=%u->%u head=%zu len=%zu",
         c, (int)fromPlayer, newCounter - 1, newCounter,
         (size_t)newHead, (size_t)(len < TEXT_BUF_SIZE ? len + 1 : TEXT_BUF_SIZE));
 }

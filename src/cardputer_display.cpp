@@ -14,6 +14,7 @@
  */
 
 #include "cardputer_display.h"
+#include "Log.h"
 #ifdef BOARD_CARDPUTER
 #include <M5Cardputer.h>
 #include <string>
@@ -32,7 +33,7 @@ void CardputerDisplay::clear() {
 void CardputerDisplay::render() {
     auto& model = MorseModel::instance();
     if (!model.isDisplayActive()) return;
-    Serial.printf("[CD] render: screen=%d wpm=%d freq=%d mode=%d\n",
+    Log::debug("[CD] render: screen=%d wpm=%d freq=%d mode=%d",
         (int)model.screen(), model.wpm(),
         (int)model.frequency(), (int)model.mode());
     clear();
@@ -96,6 +97,16 @@ void CardputerDisplay::updateStatusLine(MorseModel& model) {
     }
     M5.Display.setCursor(0, 3);
     M5.Display.print(modeStr);
+
+    // WinKey-mode indicator: a compact "WK" tag when the serial line is in
+    // WinKey mode (speaking the WinKeyer protocol to a host logger). Drawn
+    // in the accent colour so it stands out; hidden in Console/dev mode.
+    if (model.winkeyMode()) {
+        M5.Display.setTextColor(COLOR_ACCENT);
+        M5.Display.setCursor(52, 3);
+        M5.Display.print("WK");
+        M5.Display.setTextColor(COLOR_FG);
+    }
 
     // Middle: compact WPM / FREQ / VOL display
     M5.Display.setCursor(65, 3);
@@ -342,7 +353,7 @@ void CardputerDisplay::renderScrollingText(const char* text, size_t textLen, siz
         char raw = m.textAt(idx);
         dbg.push_back(raw == ' ' ? '_' : raw);
     }
-    Serial.printf("[CD] renderScrollingText: len=%zu head=%zu start=%zu maxChars=%d -> \"%s\"\n",
+    Log::debug("[CD] renderScrollingText: len=%zu head=%zu start=%zu maxChars=%d -> \"%s\"",
         len, head, start, maxChars, dbg.c_str());
 
     M5.Display.setFont(&fonts::FreeMono24pt7b);
