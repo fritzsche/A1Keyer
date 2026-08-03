@@ -60,13 +60,25 @@ pio device monitor -b 115200                # watch [INFO]/[setup] logs
 > **Upload note (TinyUSB mode).** The firmware runs USB in TinyUSB mode
 > (`ARDUINO_USB_MODE=0`) so it can expose two CDC ports. Firmware upload
 > relies on the arduino-esp32 core's built-in USB auto-reset: when
-> esptool toggles DTR/RTS (or the Arduino IDE sends a 1200-baud touch)
-> on CDC0, the core calls `usb_persist_restart(RESTART_BOOTLOADER)`,
-> which sets the ROM's download-boot flag and switches the native USB
-> port to the USB-Serial-JTAG controller for flashing. `src/usb_reset.cpp`
-> just keeps this default enabled. Recovery: if a build ever crashes very
-> early in `setup()` before USB comes up, hold **G0/BOOT** while pressing
+> esptool toggles DTR/RTS on CDC0, the core calls
+> `usb_persist_restart(RESTART_BOOTLOADER)`, which resets the chip into
+> ROM download mode. On the S3 that switches the shared USB PHY from the
+> TinyUSB-OTG controller to the USB-Serial-JTAG ROM controller
+> (VID:PID `303a:1001`), which enumerates as a *different* serial port
+> than the running app's CDC0. `platformio.ini` sets
+> `board_upload.wait_for_upload_port = yes` so PlatformIO rescans and
+> follows that new port — without it, esptool waits on the old port name
+> and fails with "No serial data received". Recovery: if a build ever
+> crashes very early in `setup()`, hold **G0/BOOT** while pressing
 > **RESET** to enter the ROM bootloader, then upload once.
+>
+> **Design note.** The S3's single USB PHY is muxed between the USB-OTG
+> controller (TinyUSB, our two CDC ports) and the hardware USB-Serial-JTAG
+> controller — only one runs at a time. So the two-port composite and the
+> zero-config JTAG upload path are mutually exclusive on one cable;
+> `wait_for_upload_port` is the standard way to keep TinyUSB uploads
+> reliable. Using hardware JTAG (`ARDUINO_USB_MODE=1`) for stable uploads
+> would give up the second CDC port.
 
 ---
 
