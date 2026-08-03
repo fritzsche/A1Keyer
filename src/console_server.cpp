@@ -193,10 +193,13 @@ void handleLog() {
 }  // namespace
 
 void ConsoleServer::begin(uint16_t port) {
-    // Re-bind if the user picks a non-default port (rare; default 80).
-    if (port != 80) {
-        _server = WebServer(port);
-    }
+    // The dev HTTP console is bound to port 80 at _server construction
+    // above (the parameter is currently unused). WebServer is not
+    // copy-assignable because it owns unique_ptr<HTTPUpload> etc., so
+    // we can't rebind to a different port here. If we ever need a
+    // configurable port, switch _server to a std::unique_ptr<WebServer>
+    // and re-allocate in begin(). For now, port 80 is fine.
+    (void)port;
     _server.on("/",            HTTP_GET, handleRoot);
     _server.on("/state",       HTTP_GET, handleState);
     _server.on("/log",         HTTP_GET, handleLog);

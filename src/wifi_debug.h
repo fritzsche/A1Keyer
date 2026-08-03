@@ -36,6 +36,13 @@ public:
     /// No-op when ENABLE_WIFI_DEBUG=0.
     static void poll();
 
+    /// Blocking WiFi scan (~1–3 s) that dumps every visible AP to the
+    /// log, with the target SSID from src/secrets.h prefixed by '*'.
+    /// Useful for diagnosing "can't find my AP" — call on demand, or
+    /// gate at boot via WIFI_DEBUG_SCAN_AT_BOOT=1 in wifi_debug.cpp.
+    /// No-op when ENABLE_WIFI_DEBUG=0.
+    static void scanAndLog();
+
     /// True once WiFi.status() == WL_CONNECTED.
     static bool isConnected();
 

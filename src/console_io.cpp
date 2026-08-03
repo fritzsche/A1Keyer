@@ -81,7 +81,21 @@ void ringReplay() {
 }  // namespace
 
 void Console::begin() {
-    Serial.begin(115200);
+    // No-op for the USB-Serial-JTAG peripheral (BOARD_CARDPUTER +
+    // ARDUINO_USB_CDC_ON_BOOT=1 + ARDUINO_USB_MODE=1). The Arduino
+    // core already installs the CDC driver and maps `Serial` to it
+    // during boot, BEFORE setup() runs. The historical Serial.begin()
+    // call here has been removed because the SET_LINE_CODING control
+    // transfer can block on some hosts (Windows before driver load,
+    // macOS while the CDC ACM driver is still claiming the interface),
+    // and that block left the rest of setup() — display, keyboard —
+    // unreachable until the user opened a serial monitor or pressed
+    // reset. The mode gate in this TU only needs to be constructed;
+    // it does not require an explicit Serial.begin().
+    //
+    // If a future port (e.g. Tab5 with the external USB-OTG peripheral)
+    // needs a different bring-up, restore the Serial.begin() there.
+    (void)0;
 }
 
 Console::Mode Console::mode() {

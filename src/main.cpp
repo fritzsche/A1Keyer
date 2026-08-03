@@ -25,6 +25,7 @@
 #include "winkey.h"
 #include "console_io.h"
 #if ENABLE_WIFI_DEBUG
+#include <WiFi.h>
 #include "wifi_debug.h"
 #include "console_server.h"
 #endif
@@ -321,11 +322,19 @@ static void handleKeyboard() {
 }
 
 void setup() {
-    // Bring up the single USB serial line via the Console mode gate
-    // (hardware USB-Serial-JTAG). Console mode by default; the 'D' key
-    // toggles WinKey mode. See src/console_io.h.
-    Console::begin();
-    delay(500);
+    // Bring up the USB-CDC peripheral ourselves, at the TOP of setup().
+    //
+    // ARDUINO_USB_CDC_ON_BOOT is 0 (see platformio.ini) so the framework
+    // does NOT call Serial.begin() in printBeforeSetupInfo() or in
+    // app_main() before we get here — that early init is what hung the
+    // boot on hosts where no serial monitor was open (issue #9004). Doing
+    // it here is safe because HWCDC::begin() on the ARDUINO_USB_MODE=1
+    // path does NOT issue a SET_LINE_CODING control transfer (that was
+    // the TinyUSB USBCDC path, which we no longer use). It just sets up
+    // the ring buffers, configures the USB PHY, and arms the IN_EMPTY
+    // interrupt. See src/console_io.cpp for the related Console-mode
+    // design (the WinKey replay ring).
+    Serial.begin(115200);
 
     auto cfg = M5.config();
     cfg.internal_spk = false;
@@ -336,36 +345,42 @@ void setup() {
     M5Cardputer.begin(true);
 #endif
 
-    delay(500);
-    Log::write("=== Morse Trainer ===\r\n");
-
-    if (!AudioEngine::begin()) {
-        Log::error("FATAL: AudioEngine::begin failed");
-        while (true) delay(1000);
-    }
-    AudioEngine::createMorseGen();
-
-    // WinKeyer 2.x emulation on USB CDC1 (second serial port). Host
-    // loggers (e.g. RUMlogNG) drive keying over this port while CDC0
-    // stays free for upload + monitor + logs. See docs/winkey.md.
-    Winkey::begin();
-
-    // Radio keying output (Cardputer only). Subscribes to KeyEventBus.
-#ifdef BOARD_CARDPUTER
-    RadioKeyer::begin();
-#endif
-
-    // Paddle key input (GPIO interrupts)
-    MorseKey::begin();
-
-    // Decoder: wire both keyers' ring buffers to MorseDecoder
-    MorseDecoder::begin(AudioEngine::keyer(), AudioEngine::straightKeyer());
-
-    // Initialize display system
+    // Bring the display up BEFORE the rest of the heavy init, so the
+    // user sees the device is alive immediately on plug-in. If audio
+    // or keying init fails later, the screen at least shows something.
 #ifdef BOARD_CARDPUTER
     DisplayTask::begin(new CardputerDisplay());
 #else
     DisplayTask::begin(nullptr);
+#endif
+
+    Log::write("=== Morse Trainer ===\r\n");
+
+    if (!AudioEngine::begin()) {
+        // Log and continue rather than hang forever. The display will
+        // still be alive; the user can read the error on screen and on
+        // the serial monitor. Previously this was `while(true) delay(1000)`
+        // which left the device looking dead until a reset.
+        Log::error("FATAL: AudioEngine::begin failed (continuing without audio)");
+    } else {
+        AudioEngine::createMorseGen();
+
+        // WinKeyer 2.x emulation on USB CDC1 (second serial port). Host
+        // loggers (e.g. RUMlogNG) drive keying over this port while CDC0
+        // stays free for upload + monitor + logs. See docs/winkey.md.
+        Winkey::begin();
+
+        // Paddle key input (GPIO interrupts)
+        MorseKey::begin();
+
+        // Decoder: wire both keyers' ring buffers to MorseDecoder
+        MorseDecoder::begin(AudioEngine::keyer(), AudioEngine::straightKeyer());
+    }
+
+    // Radio keying output (Cardputer only). Subscribes to KeyEventBus.
+    // Independent of audio — works even if AudioEngine::begin() failed.
+#ifdef BOARD_CARDPUTER
+    RadioKeyer::begin();
 #endif
 
     // Load persisted settings from EEPROM (Preferences)

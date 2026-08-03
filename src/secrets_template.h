@@ -8,10 +8,18 @@
  *
  * src/secrets.h is in .gitignore and will NOT be checked in.
  *
- * These macros are only consumed by src/wifi_debug.cpp when
- * ENABLE_WIFI_DEBUG=1 is set in platformio.ini. With the default
- * ENABLE_WIFI_DEBUG=0 the whole network subsystem is compiled out,
- * so missing macros are harmless.
+ * Auto-enable behaviour (scripts/wifi_debug_auto.py, a PlatformIO
+ * pre-script referenced from platformio.ini):
+ *   - src/secrets.h missing  -> ENABLE_WIFI_DEBUG=0  (no WiFi, no HTTP)
+ *   - src/secrets.h present  -> ENABLE_WIFI_DEBUG=1  (HTTP console on
+ *                               port 80, IP printed to the serial log)
+ * So the mere existence of this file is your opt-in. No need to touch
+ * platformio.ini — the file's git-ignored status means toggling is
+ * purely local and never reaches the repo.
+ *
+ * When ENABLE_WIFI_DEBUG=0 the macros below are never read by the
+ * compiler, so this template can sit in the repo with placeholder
+ * values without leaking anything.
  *
  * IP layout:
  *   - WIFI_STATIC_IP — your chosen device IP (must be reserved on the
