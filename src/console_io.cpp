@@ -38,19 +38,41 @@ void ringPush(uint8_t b) {
 }
 
 // Replay the ring to the wire and clear it. Called on WinKey → Console.
+//
+// MUST be called with _mux RELEASED. Serial.write() on USB-Serial-JTAG
+// blocks on a FreeRTOS ring buffer (xRingbufferSend), which parks the task
+// on an event list. Doing that inside portENTER_CRITICAL() disables
+// interrupts, so the tick and the USB ISR that would drain the FIFO can
+// never run — the task blocks forever and the interrupt watchdog panics
+// the core. We therefore copy out of the ring in small chunks under short
+// critical sections and write each chunk with the lock released.
 void ringReplay() {
-    if (_ringLen == 0) return;
     char hdr[48];
+    portENTER_CRITICAL(&_mux);
+    size_t pending = _ringLen;
+    portEXIT_CRITICAL(&_mux);
+    if (pending == 0) return;
+
     int n = snprintf(hdr, sizeof(hdr),
                      "\r\n--- %u buffered log bytes ---\r\n",
-                     (unsigned)_ringLen);
+                     (unsigned)pending);
     if (n > 0) Serial.write((const uint8_t*)hdr, (size_t)n);
-    for (size_t i = 0; i < _ringLen; ++i) {
-        Serial.write((uint8_t)_ring[(_ringHead + i) % kRingSize]);
+
+    for (;;) {
+        char   chunk[64];
+        size_t n2 = 0;
+        portENTER_CRITICAL(&_mux);
+        while (n2 < sizeof(chunk) && _ringLen > 0) {
+            chunk[n2++] = _ring[_ringHead];
+            _ringHead = (_ringHead + 1) % kRingSize;
+            --_ringLen;
+        }
+        portEXIT_CRITICAL(&_mux);
+        if (n2 == 0) break;
+        Serial.write((const uint8_t*)chunk, n2);   // lock released here
     }
+
     Serial.write((const uint8_t*)"\r\n--- end buffered ---\r\n", 24);
-    _ringHead = 0;
-    _ringLen  = 0;
 }
 
 }  // namespace
@@ -70,11 +92,17 @@ bool Console::isWinKey() {
 void Console::setMode(Mode m) {
     if (m == _mode) return;
     if (_mode == Mode::WinKey && m == Mode::Console) {
-        // Leaving WinKey mode: flush what was captured.
+        // Flip the mode FIRST, under the lock, then replay with the lock
+        // released. Flipping first matters twice over: concurrent loggers
+        // go straight to the wire instead of refilling the ring (a chatty
+        // task would otherwise keep the drain loop alive indefinitely),
+        // and ringReplay() is free to block in Serial.write() because no
+        // critical section is held. Cost is that a log line raced in
+        // during replay may interleave with the buffered text — cosmetic.
         portENTER_CRITICAL(&_mux);
-        ringReplay();
         _mode = m;
         portEXIT_CRITICAL(&_mux);
+        ringReplay();
         return;
     }
     // Entering WinKey mode (or any other transition): just switch. Start
