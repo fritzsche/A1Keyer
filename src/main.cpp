@@ -301,17 +301,8 @@ static void handleKeyboard() {
 }
 
 void setup() {
-    // CRITICAL: release any GPIO0 hold set by the previous firmware
-    // (see src/usb_reset.cpp::enterDownloadMode). If we boot after
-    // an upload that triggered the auto-reset, the pin is being held
-    // LOW across the reset — without this call the chip would boot
-    // back into the ROM bootloader forever. Must be the FIRST thing
-    // in setup(), before any risky operation that could abort boot.
-    gpio_hold_dis(GPIO_NUM_0);
-
-    // Auto-reset into download mode on the esptool.py DTR/RTS dance
-    // and the Arduino IDE 1200-baud touch. Disables the framework's
-    // broken auto-reset path and registers our polling in loop().
+    // Ensure the framework's USB auto-reset (esptool DTR/RTS + 1200-baud
+    // touch → download mode) stays enabled on CDC0. See src/usb_reset.cpp.
     UsbReset::begin();
 
     Serial.begin(115200);

@@ -1,68 +1,49 @@
 #pragma once
 /**
- * usb_reset.h — always-on auto-reset for the composite USB-CDC device.
+ * usb_reset.h — keep the framework's USB auto-reset enabled.
  *
  * Why this exists
  * ---------------
- * The ESP32-S3 Arduino core's built-in auto-reset
- * (USBCDC::_onLineState / USBCDC::_onLineCoding in USBCDC.cpp) does
- * not work for the Cardputer ADV because:
+ * With ARDUINO_USB_MODE=0 (TinyUSB composite, two CDC ports) the
+ * arduino-esp32 core's built-in USB auto-reset on `Serial` (CDC0) is the
+ * correct upload mechanism:
  *
- *   1. The DTR/RTS state machine only fires on the esptool.js sequence
- *      `!dtr&&rts → dtr&&rts → dtr&&!rts → !dtr&&!rts`, which is not
- *      what PlatformIO's esptool.py sends.
+ *   - USBCDC::_onLineState() implements the esptool DTR/RTS reset
+ *     sequence (IDLE → !dtr&rts → dtr&rts → dtr&!rts → !dtr&!rts) and
+ *     USBCDC::_onLineCoding() implements the 1200-baud touch. Both call
+ *     usb_persist_restart(RESTART_BOOTLOADER). This IS the sequence
+ *     PlatformIO's esptool sends.
  *
- *   2. usb_persist_restart(RESTART_BOOTLOADER) calls
- *      usb_switch_to_cdc_jtag() (esp32-hal-tinyusb.c:638-642) before
- *      esp_restart(). On the Cardputer ADV the USB-C connector is
- *      wired to USB-OTG (GPIO19/20); USB-Serial-JTAG is not brought
- *      out externally, so the host loses the device even if the reset
- *      had fired.
+ *   - On the ESP32-S3, usb_persist_restart(RESTART_BOOTLOADER) sets
+ *     RTC_CNTL_FORCE_DOWNLOAD_BOOT and switches the native USB pins
+ *     (GPIO19/20 → the USB-C connector) to the USB-Serial-JTAG
+ *     controller. USB-OTG and USB-Serial-JTAG share those pins, so the
+ *     ROM download comes up over the SAME USB-C cable — the standard
+ *     ESP32-S3 flashing path.
  *
- * What this does
- * --------------
- * The module polls `Serial.dtr`, `Serial.rts`, and `Serial.bit_rate`
- * from `loop()` so it does not depend on the framework's event posting
- * (which is filtered by the failed state machine). It detects the
- * esptool.py DTR/RTS dance (≥ 3 alternating DTR/RTS transitions within
- * 500 ms of the first transition) and the Arduino-IDE 1200-baud touch.
+ * It is enabled by default (reboot_enable = true). This module exists
+ * only to make that explicit, in case some other code path disables it.
  *
- * On a positive match, it drives GPIO0 LOW *and* enables the
- * GPIO pad hold (`gpio_hold_en`) BEFORE calling `esp_restart()`. The
- * pad hold keeps the pin state across the software reset, which is
- * essential: the strap pin is sampled by the external circuit at the
- * moment of reset, not by the GPIO peripheral's latches. Without the
- * hold, the on-board pull-up would pull GPIO0 HIGH before the ROM
- * bootloader sampled it, and the chip would boot normally instead of
- * into the download mode.
- *
- * The new firmware must call `gpio_hold_dis(GPIO_NUM_0)` at the very
- * top of `setup()` to release the hold; otherwise the device is
- * permanently stuck in download mode. The patch in main.cpp does
- * exactly that — it is the first statement of `setup()`.
- *
- * Pattern detector robustness
- * ---------------------------
- * The threshold (≥ 3 transitions within 500 ms) tolerates the
- * esptool.py v4 default sequence, which fires 4 transitions spaced
- * 50–100 ms apart. A regular terminal opens the port and leaves
- * DTR/RTS stable, producing 0–1 transitions, so it never reaches the
- * threshold.
+ * Historical note: an earlier version of this module DISABLED the
+ * framework path (enableReboot(false)) and drove GPIO0 low + esp_restart()
+ * instead — on the wrong assumption that the core state machine didn't
+ * match esptool and that USB-Serial-JTAG wasn't reachable. Both were
+ * incorrect. GPIO0 is the UART-download strap, not USB, so that hack
+ * never entered USB download mode; esptool then talked to the running
+ * app's CDC0 and reported "Invalid head of packet (0x5B)" (our log text).
  *
  * Usage
  * -----
- *   - Call UsbReset::begin() in setup() BEFORE Serial.begin().
- *   - Call UsbReset::poll()  in loop().
- *   - gpio_hold_dis(GPIO_NUM_0) at the very top of setup().
+ *   - Call UsbReset::begin() in setup().
+ *   - UsbReset::poll() is a no-op (kept for API symmetry).
  */
 class UsbReset {
 public:
-    /// Disable the framework's auto-reset on CDC0 and seed the polling
-    /// state. Idempotent.
+    /// Ensure the framework's auto-reset on CDC0 is enabled. Idempotent.
     static void begin();
 
-    /// Poll CDC0's DTR/RTS/baud for the upload-reset patterns. Call
-    /// once per iteration of loop().
+    /// No-op — reset detection lives in the core's USBCDC. Kept for
+    /// API symmetry with the loop() call site.
     static void poll();
 
 private:
