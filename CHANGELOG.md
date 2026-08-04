@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **WinKey soft reset no longer closes the host interface.**
+  `WinkeyBridge::handleAdmin(ADMIN_RESET)` previously called
+  `resetForTest()`, which set `_open=false`. RUMlogNG (and every
+  other shipping WK2 host — N1MM, fldigi, WriteLog) issues a
+  defensive `0x00 0x01` as part of its init sequence and then
+  immediately sends `0x07` (GetPot), `0x15` (ReqStatus), or text.
+  With the old behaviour every byte after the reset was silently
+  dropped, RUMlogNG got the version byte on its initial open but
+  then timed out on its post-reset probe and reported "Interface is
+  not available". The fix splits the reset work into a new
+  `resetParams()` helper that restores parameter defaults, idles
+  the parser, and clears the send buffer, but does NOT touch
+  `_open` (or `_wk2Mode`). The test entry point
+  `resetForTest()` still forces `_open=false` so each test case
+  starts clean. Matches K3NG and `hamlib/rig/winkey.c`
+  behaviour. Documented in `docs/winkey.md § 5.2`; the original
+  failing wire trace from RUMlogNG is reproduced there.
+
 ### Changed
 - **CI removed.** `.github/workflows/ci.yml` (the matrix of
   Ubuntu/macOS/Windows × g++/clang++ unit-test runs) has been

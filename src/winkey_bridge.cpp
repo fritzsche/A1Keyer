@@ -106,6 +106,10 @@ void WinkeyBridge::begin(OutputFn out, void* outCtx, const Callbacks& cb) {
 void WinkeyBridge::resetForTest() {
     _open = false;
     _wk2Mode = false;
+    resetParams();
+}
+
+void WinkeyBridge::resetParams() {
     _parse = Parse::IDLE;
     _pendingCmd = 0;
     _paramGot = 0;
@@ -201,7 +205,19 @@ void WinkeyBridge::handleAdmin(uint8_t sub) {
             _wk2Mode = false;
             return;
         case ADMIN_RESET:
-            resetForTest();          // defaults; host must re-open
+            // Restore parameter defaults but keep the host interface
+            // open (K3NG / hamlib friendly behaviour). Real-world
+            // hosts (N1MM, RUMlogNG, fldigi, WriteLog) routinely issue
+            // a defensive reset as part of their init sequence — see
+            // docs/winkey.md § 5.1 — and then immediately send GetPot,
+            // ReqStatus, or text. The K1EL WK2 datasheet technically
+            // requires the host to re-open after reset, but every
+            // shipping WK2 emulator (K3NG, hamlib winkey.c) chooses to
+            // stay open because in practice no logger actually
+            // re-opens. Without this change, RUMlogNG sees the version
+            // byte on open, then "Interface is not available" once
+            // every command after its reset is silently dropped.
+            resetParams();
             return;
         case ADMIN_HOST_CLOSE:
             _open = false;

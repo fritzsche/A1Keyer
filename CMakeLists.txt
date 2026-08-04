@@ -26,10 +26,6 @@ set(LIB_SOURCES
     src/key_event_bus.cpp
     src/radio_keyer.cpp
     src/winkey_bridge.cpp
-    src/console_io.cpp
-    src/wifi_debug.cpp
-    src/console_server.cpp
-    src/winkey.cpp
 )
 
 # ---------------------------------------------------------------------------
@@ -43,12 +39,10 @@ foreach(SUITE IN ITEMS
     test_morse_generator
     test_iambic_keyer
     test_morse_decoder
-    test_straight_keyer
     test_display_model
     test_key_event_bus
     test_radio_keyer
     test_winkey_bridge
-    test_log_ring
 )
     add_executable(${SUITE}
         test/${SUITE}/${SUITE}.cpp

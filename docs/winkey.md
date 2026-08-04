@@ -302,7 +302,7 @@ is admin command `0x02`. So the byte sequence is:
 |---|---|---|---|
 | **Host Open** | `0x00 0x02` | one byte: version (`0x05`/`0x06`/`0x07`) | Open the host interface; enter operating mode. After open, WK1 mode is set by default. |
 | **Enter WK2 mode** | (admin `0x0B`) | one byte | Switch to WK2-mode status bytes (§ 12.2) and other WK2-only behaviour. Issued **after** host-open. |
-| **Soft reset** | `0x00 0x01` | `0x00` | Admin command 1 — Reset. Returns to defaults. Host must re-open. |
+| **Soft reset** | `0x00 0x01` | `0x00` | Admin command 1 — Reset. Restores parameter values to defaults. The K1EL WK2 datasheet requires the host to re-open after reset; A1Keyer deviates intentionally — see *A1Keyer-specific* below. |
 | **Host Close** | `0x00 0x03` | one byte | Admin command 3 — Close the host interface. |
 
 > **Verified against [WK2 datasheet v23 § 4](https://hamcrafters2.com/files/WK2_Datasheet_v23.pdf), page 5.**
@@ -339,6 +339,54 @@ bridge ←  0x00
   `OPTION_WINKEY_*` flags in `k3ng_cw_keyer/k3ng_keyer/keyer_features_and_options.h`).
 - The bridge echoes the open bytes first, then sends the version reply
   (matches K3NG behaviour; some hosts rely on this order).
+
+**Soft reset (`0x00 0x01`) keeps the host open.** The K1EL WK2 datasheet
+specifies that admin reset returns the chip to power-up state and
+requires the host to re-open before any further commands. A1Keyer
+deliberately does **not** clear `_open` on reset: it restores all
+parameter values (WPM, sidetone, weight, Farnsworth, PTT times, keyer
+mode, hang time, ratio, output-enable) to defaults, idles the parser,
+and clears the send buffer, but the host interface stays open so
+subsequent GetPot / ReqStatus / text bytes are processed normally.
+
+Rationale: every shipping WK2 emulator (K3NG, hamlib `winkey.c`)
+follows the same friendly behaviour, because in practice no real-world
+host actually re-opens after a reset. **N1MM Logger+, RUMlogNG, fldigi,
+and WriteLog all issue a defensive reset as part of their init
+sequence** (typically between `0x00 0x0B` (Set WK2) and the first
+GetPot / ReqStatus), and then immediately send further commands
+expecting replies. Without this behaviour, every command after the
+reset is silently dropped — the host gets the version byte on its
+initial open, then sees "Interface is not available" once its
+post-reset probe times out. The original RUMlogNG trace that
+motivated this change is reproduced below:
+
+```
+RX (host → bridge, 96 bytes)
+  00 02            Host Open                → bridge replies 0x17  ✓
+  00 0B            Set WK2 mode             (silent)               ✓
+  00 0F            Admin 15 (Load XMODE)    (silent)               ✓
+  00 01            Admin RESET              ← was closing _open    ✗
+  01 10 00         sidetone, ext, ...       (silently dropped)
+  0E 44            SetMode                  (silently dropped)
+  ...
+  07               GetPot                   (silently dropped — should reply 0x80)
+  15               ReqStatus                (silently dropped — should reply status)
+  43 51 20 43 51 20 44 45 20 44 4A 31 54 46 20 ...   text "CQ CQ DE DJ1TF ..."
+                                            (silently dropped — no echo)
+
+TX (bridge → host): one byte, 0x17. Nothing else.
+```
+
+After the fix the bridge stays open, `0x07` returns `0x80`, `0x15`
+returns a status byte with the `0xC0` 3-MSB tag, the text stream is
+echoed upper-cased, and RUMlogNG transitions from "Interface is not
+available" to a live CW keyer.
+
+The test entry point `WinkeyBridge::resetForTest()` is unchanged and
+still forces `_open=false` so each host-side test case starts from a
+clean slate. Wire-facing reset goes through a new private helper
+`resetParams()` that does the parameter work without touching `_open`.
 
 ---
 

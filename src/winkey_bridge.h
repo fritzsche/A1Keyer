@@ -77,8 +77,19 @@ public:
     /// WK version byte reported on host-open. 0x17 = WK2 rev 2.3.
     static constexpr uint8_t kVersion = 0x17;
 
-    /// Reset all protocol state. Used by host tests between RUN() cases.
+    /// Reset all protocol state including `_open=false`. Used by host
+    /// tests between RUN() cases; the wire-facing admin-reset path does
+    /// NOT call this — it must keep the host interface open so a
+    /// defensive reset from the host (N1MM / RUMlogNG / fldigi issue
+    /// one as part of their init sequence) doesn't silently drop every
+    /// subsequent command. See handleAdmin(ADMIN_RESET) and
+    /// docs/winkey.md § 5.1.
     void resetForTest();
+
+    /// Restore default parameter values, idle the parser, and clear
+    /// the send buffer. Does NOT touch `_open` or `_wk2Mode`. Used by
+    /// both the test entry point and the wire-facing admin-reset path.
+    void resetParams();
 
     // ─── Stored parameters (exposed for tests / status readback) ─────────
     int  wpm() const        { return _wpm; }

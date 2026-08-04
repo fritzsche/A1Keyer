@@ -562,20 +562,41 @@ def test_reopen(host: WinkeyHost, http: HttpConsole, p: Printer) -> TestResult:
 
 
 def test_reset_restores_defaults(host: WinkeyHost, http: HttpConsole, p: Printer) -> TestResult:
-    """0x00 0x01 → reset to defaults (WPM 20)."""
+    """0x00 0x01 → reset parameters to defaults. The bridge STAYS OPEN
+    (K3NG-friendly behaviour) — every shipping WK2 emulator does this
+    because real-world hosts (N1MM, RUMlogNG, fldigi) issue a defensive
+    reset as part of their init sequence and then immediately send
+    GetPot / ReqStatus / text. See docs/winkey.md § 5.1."""
     sent = bytes([ADMIN, ADMIN_RESET])
     _, rx = host.exchange(sent, expect=0, timeout=0.4)
     time.sleep(0.3)
     s = http.state() or {}
     wpm = s.get("winkeyWpm", -1) if s else -1
-    is_open = s.get("winkeyOpen", True) if s else True
-    ok = (len(rx) == 0) and (wpm == 20) and (is_open is False)
+    is_open = s.get("winkeyOpen", False) if s else False
+    ok = (len(rx) == 0) and (wpm == 20) and (is_open is True)
     return TestResult(
-        name="admin_reset_defaults",
+        name="admin_reset_defaults_keeps_open",
         passed=ok,
-        detail=f"winkeyWpm={wpm} (want 20), winkeyOpen={is_open} (want False)"
-              if not ok else "wpm=20, winkeyOpen=False",
+        detail=f"winkeyWpm={wpm} (want 20), winkeyOpen={is_open} (want True)"
+              if not ok else "wpm=20, winkeyOpen=True (bridge stays open)",
         sent=sent, received=rx, http_state=s,
+    )
+
+
+def test_get_pot_after_reset(host: WinkeyHost, http: HttpConsole, p: Printer) -> TestResult:
+    """Regression test for the RUMlogNG "Interface is not available" bug:
+    after a defensive reset, 0x07 (GetPot) MUST still return 0x80. Before
+    the fix, reset closed the bridge and this byte was silently dropped,
+    leaving RUMlogNG timing out on its post-reset GetPot probe."""
+    sent = bytes([GET_POT])
+    _, rx = host.exchange(sent, expect=1, timeout=0.5)
+    ok = len(rx) == 1 and rx[0] == GET_POT_REPLY
+    return TestResult(
+        name="get_pot_after_reset_returns_0x80",
+        passed=ok,
+        detail=f"got {hexstr(rx) or '(nothing)'}, expected 0x{GET_POT_REPLY:02X}" if not ok
+              else f"got 0x{rx[0]:02X} (bridge stayed open through reset)",
+        sent=sent, received=rx,
     )
 
 
@@ -698,6 +719,7 @@ ALL_PLAN: List[Callable] = [
     test_text_ignored_when_closed,
     test_reopen,
     test_reset_restores_defaults,
+    test_get_pot_after_reset,    # regression: bridge stays open across reset
 ]
 
 
@@ -752,12 +774,15 @@ def main():
             return 3
 
         # Initial reset for a clean test slate. Host-Open first so the
-        # reset command isn't ignored, then open again for the test plan.
+        # reset command isn't ignored (admin commands other than
+        # 0x00 0x01 are accepted pre-open, but reset of internal state
+        # is cleaner once open). The bridge now stays open through the
+        # reset (K3NG-friendly behaviour, see docs/winkey.md § 5.1), so
+        # we only need one Host-Open here.
         p.header("Pre-test: host-open + reset to clear state")
         host.drain()
         host.exchange(bytes([ADMIN, ADMIN_HOST_OPEN]), expect=1, timeout=1.0)
         host.exchange(bytes([ADMIN, ADMIN_RESET]),       expect=0, timeout=0.5)
-        host.exchange(bytes([ADMIN, ADMIN_HOST_OPEN]), expect=1, timeout=1.0)
         host.exchange(bytes([ADMIN, ADMIN_SET_WK2]),   expect=0, timeout=0.4)
         host.drain()
         time.sleep(0.2)

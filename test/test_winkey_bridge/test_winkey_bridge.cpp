@@ -181,15 +181,57 @@ static void test_key_immediate() {
     CHECK(!g_spy.lastOutputEn);
 }
 
-// ─── Reset (admin 0x01) restores defaults and closes ────────────────────
-static void test_reset_restores_and_closes() {
+// ─── Reset (admin 0x01) restores defaults but keeps the host open ─────
+// Real-world hosts (N1MM, RUMlogNG, fldigi, WriteLog) routinely send a
+// defensive reset as part of their init sequence and then immediately
+// follow up with GetPot / ReqStatus / text. The K1EL WK2 datasheet
+// technically requires the host to re-open after reset, but every
+// shipping WK2 emulator (K3NG, hamlib winkey.c) chooses to stay open
+// because in practice no logger actually re-opens — see
+// docs/winkey.md § 5.1 and the trace in the bug that motivated this
+// test (RUMlogNG: "Interface is not available" after version 23).
+static void test_reset_restores_defaults_keeps_open() {
     WinkeyBridge b = makeBridge();
     open(b);
-    b.feed(0x02); b.feed(40);
+    b.feed(0x02); b.feed(40);                // change WPM from default
+    b.feed(0x00); b.feed(0x0B);              // enter WK2 mode
+    b.feed(0x01); b.feed(5);                 // change sidetone preset 5
     CHECK_EQ(b.wpm(), 40);
-    b.feed(0x00); b.feed(0x01);  // admin reset
+    CHECK_EQ(b.sidetoneHz(), 800);
+
+    b.feed(0x00); b.feed(0x01);              // admin reset
+
+    // Defaults restored.
     CHECK_EQ(b.wpm(), 20);
+    CHECK_EQ(b.sidetoneHz(), 600);
+
+    // Bridge STAYS open — the host's defensive reset must not close
+    // the interface.
+    CHECK(b.isOpen());
+
+    // Subsequent commands must still be processed: a SetSpeed after
+    // reset should still update WPM, proving the parser is wired back
+    // up and the bridge is alive.
+    b.feed(0x02); b.feed(25);
+    CHECK_EQ(b.wpm(), 25);
+
+    // Text after reset must still echo (not be dropped as "before open").
+    feedText(b, "CQ");
+    b.poll();
+    CHECK_STR_EQ(g_spy.lastSend.c_str(), "CQ");
+}
+
+// ─── resetForTest() still forces _open=false ──────────────────────────
+// resetForTest() is the test-suite entry point; it must still force
+// _open=false so each test starts from a clean slate. This guards
+// against future refactors that might collapse resetForTest and
+// resetParams into one path.
+static void test_reset_for_test_still_closes() {
+    WinkeyBridge b = makeBridge();
+    open(b);
+    b.resetForTest();
     CHECK(!b.isOpen());
+    CHECK_EQ(b.wpm(), 20);
 }
 
 // ─── Multi-param command (PTT times, 0x04) consumes both params ─────────
@@ -219,7 +261,8 @@ int main() {
     RUN(test_clear_buffer_stops);
     RUN(test_status_request_replies);
     RUN(test_key_immediate);
-    RUN(test_reset_restores_and_closes);
+    RUN(test_reset_restores_defaults_keeps_open);
+    RUN(test_reset_for_test_still_closes);
     RUN(test_ptt_times_consumes_two_params);
     return test_summary();
 }
