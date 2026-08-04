@@ -49,8 +49,17 @@ void cbSetOutputEnable(bool on, void* /*ctx*/) {
 
 void cbSendText(const char* text, void* /*ctx*/) {
     MorseGenerator* gen = AudioEngine::morseGen();
-    if (gen) {
-        MorseModel::instance().setMode(KeyerMode::ENCODER);
+    if (!gen) return;
+    MorseModel::instance().setMode(KeyerMode::ENCODER);
+    // Defensive: only start a fresh playback if the generator is
+    // idle. The bridge's poll() should already have checked
+    // canAcceptText() and skipped us if we are mid-word, but if
+    // anything still reaches us while busy, ignore it — the text
+    // stays in the bridge buffer and the next idle poll will drain
+    // the accumulated chunk. Restarting playText() per character
+    // produces an audible click and choppy audio. See
+    // docs/winkey.md "Text playback and the audio click bug".
+    if (!gen->isPlaying()) {
         gen->playText(text);
     }
     // Echo is now handled in WinkeyBridge::appendText (per-byte,
@@ -64,6 +73,15 @@ void cbStopSending(void* /*ctx*/) {
     if (gen) gen->stop();
 }
 
+// Returns true if the audio player can accept a fresh sendText()
+// chunk. poll() consults this so back-to-back text bytes accumulate
+// in the bridge buffer and play as one phrase instead of restarting
+// the player on every char.
+bool cbCanAcceptText(void* /*ctx*/) {
+    MorseGenerator* gen = AudioEngine::morseGen();
+    return gen && !gen->isPlaying();
+}
+
 }  // namespace
 
 void Winkey::begin() {
@@ -73,6 +91,7 @@ void Winkey::begin() {
     cb.setSidetoneHz   = &cbSetSidetoneHz;
     cb.setOutputEnable = &cbSetOutputEnable;
     cb.sendText        = &cbSendText;
+    cb.canAcceptText   = &cbCanAcceptText;
     cb.stopSending     = &cbStopSending;
     cb.ctx             = nullptr;
     _bridge.begin(&wkOut, nullptr, cb);

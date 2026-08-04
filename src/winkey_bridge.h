@@ -49,8 +49,17 @@ public:
         void (*setSidetoneHz)(int hz, void* ctx)         = nullptr;
         void (*setOutputEnable)(bool on, void* ctx)      = nullptr;
         // Send accumulated text as CW. Called from poll() when the send
-        // buffer has content. The device hook hands it to MorseGenerator.
+        // buffer has content AND canAcceptText() returns true. The
+        // device hook hands it to MorseGenerator; if the generator is
+        // already mid-playback, the hook should return without calling
+        // playText() and let the buffer accumulate for the next poll.
         void (*sendText)(const char* text, void* ctx)    = nullptr;
+        // Query: is the consumer ready to accept a new sendText() call?
+        // poll() skips draining the buffer when this returns false, so
+        // rapid back-to-back text bytes accumulate into one chunk
+        // instead of restarting playback on every char. Default
+        // (nullptr) is "always accept" — backwards compatible.
+        bool (*canAcceptText)(void* ctx)                 = nullptr;
         void (*stopSending)(void* ctx)                   = nullptr;   // 0x0A clear
         void* ctx                                        = nullptr;
     };

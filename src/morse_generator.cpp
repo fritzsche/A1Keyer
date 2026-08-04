@@ -66,16 +66,27 @@ void MorseGenerator::debugDumpEnvelope() const {
 // Start playing a text string
 // ---------------------------------------------------------------------------
 void MorseGenerator::playText(const char* text) {
-    _playText = text;
+    // COPY the text — never store the caller's pointer. The WinKey
+    // bridge hands us a stack-local chunk in WinkeyBridge::poll();
+    // after that call returns the chunk is gone and the audio task
+    // would read garbage. The std::string member keeps the text alive
+    // for the whole playback. See docs/winkey.md "Text playback and
+    // the audio click bug".
+    if (text) {
+        _playText.assign(text);
+    } else {
+        _playText.clear();
+    }
     _charIdx = 0;
-    _elements = _encoder.encode(text);
+    _elements = _encoder.encode(_playText.c_str());
     _elIdx = 0;
     _elSamplePos = 0;
     _state = State::PLAYING;
-    _currentChar = text[0];
+    _currentChar = _playText.empty() ? '\0' : _playText[0];
     _phase = 0.0f;  // reset sine phase so next tone starts at zero
     _phaseInc = 0.0f;
-    Log::write("[MG] playText: text=\"%s\" elements=%zu\n", text, (unsigned)_elements.size());
+    Log::write("[MG] playText: text=\"%s\" elements=%zu\n",
+                  _playText.c_str(), (unsigned)_elements.size());
     MorseModel::instance().resetPlayerHead();  // fresh session, reset player color tracking
     // Do NOT clear the buffer — append to existing keyer text
     advanceToNextElement();
@@ -102,15 +113,15 @@ void MorseGenerator::stop() {
 void MorseGenerator::advanceToNextElement() {
     Log::write("[MG] advanceToNext: elIdx=%zu size=%zu charIdx=%zu/%zu char='%c'(%d)\n",
         (unsigned)_elIdx, (unsigned)_elements.size(),
-        (unsigned)_charIdx, strlen(_playText),
-        _charIdx < strlen(_playText) ? _playText[_charIdx] : '?',
-        (unsigned char)(_charIdx < strlen(_playText) ? _playText[_charIdx] : 0));
+        (unsigned)_charIdx, _playText.size(),
+        _charIdx < _playText.size() ? _playText[_charIdx] : '?',
+        (unsigned char)(_charIdx < _playText.size() ? _playText[_charIdx] : 0));
     if (_elIdx >= _elements.size()) {
         // All elements exhausted — append all remaining characters.
         // Every character that was played as a mark but had no trailing CHAR_SPACE
         // needs to be appended here. These are exactly the characters from
         // _charIdx onwards (each was advanced past but never had a CHAR_SPACE).
-        while (_charIdx < strlen(_playText)) {
+        while (_charIdx < _playText.size()) {
             char c = _playText[_charIdx];
             Log::write("[MG] boundary: appending char='%c' at idx=%zu\n",
                 (unsigned char)c >= 32 ? (unsigned char)c : '?', (unsigned)_charIdx);
@@ -138,7 +149,7 @@ void MorseGenerator::advanceToNextElement() {
         // This ensures the right char is captured at the boundary.
         _currentChar = _playText[_charIdx];
         Log::write("[MG] mark: charIdx=%zu/%zu char='%c'(%d) elType=%d\n",
-            (unsigned)_charIdx, strlen(_playText),
+            (unsigned)_charIdx, _playText.size(),
             (unsigned char)_currentChar >= 32 ? (unsigned char)_currentChar : '?',
             (unsigned char)_currentChar,
             (int)elType);
@@ -160,7 +171,7 @@ void MorseGenerator::advanceToNextElement() {
                 Log::write("[MG] APPEND t=%u char='%c' playPos=%zu/%zu\n",
                     now,
                     (unsigned char)_currentChar >= 32 ? (unsigned char)_currentChar : '?',
-                    (unsigned)_charIdx, strlen(_playText));
+                    (unsigned)_charIdx, _playText.size());
                 MorseModel::instance().appendDecodedChar(_currentChar, true);
                 ++_charIdx;
                 _currentChar = _playText[_charIdx];

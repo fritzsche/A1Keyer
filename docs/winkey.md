@@ -691,6 +691,80 @@ buffer keying work at once.
 
 ## 14. Pin and event reporting
 
+### 13.6 Text playback and the audio click bug
+
+RUMlogNG (and every WK2 host that uses the simple "stream text as it
+arrives" path) sends characters as fast as the serial line can carry
+them. On the first iteration of this bridge, `WinkeyBridge::poll()`
+drained the buffer to `cbSendText()` on every loop tick, and
+`cbSendText` unconditionally called `MorseGenerator::playText()`.
+Two coupled bugs followed:
+
+1. **Per-character audio restart.** `playText()` re-encodes the
+   string, resets `_elIdx` / `_elSamplePos`, and clears the sine
+   phase. Doing this on every char means the audio engine drops out
+   of the middle of one tone and starts a new tone from sample 0
+   on the next char — a hard discontinuity, audible as a click on
+   every character boundary. The user described it as "the audio
+   clicks as if it's regularly restarting the audio playback".
+2. **Dangling `_playText` pointer.** `cbSendText` was called with
+   a stack-local `chunk[]` from `poll()`; `MorseGenerator` aliased
+   that pointer in `const char* _playText`. After `cbSendText`
+   returned the chunk was gone, so the audio task — running on a
+   different FreeRTOS task — walked into freed stack memory and
+   the decoder appended garbage bytes (`#`, `?`, NUL) to the
+   decoded-text ring buffer. The display showed "## ##" where the
+   user sent "CQ TEST".
+
+The fixes:
+
+- **`WinkeyBridge::Callbacks::canAcceptText`** — a new query callback
+  on the bridge (`src/winkey_bridge.h:62`). `poll()` consults it
+  before draining; if the audio player is busy, `poll()` returns
+  without touching the buffer. Text accumulates and the next idle
+  poll drains the entire pending chunk in one `sendText()` call.
+  The default (nullptr) is "always accept" so existing unit tests
+  and any future consumer that does not register the callback stay
+  backwards compatible.
+- **`Winkey::cbCanAcceptText`** in `src/winkey.cpp:80` returns
+  `gen && !gen->isPlaying()`, mirroring the device glue for the
+  only consumer that needs the gate.
+- **Defence in depth in `cbSendText`** — even if a caller reaches
+  the hook while the generator is busy, the hook skips
+  `playText()` instead of restarting.
+- **`std::string _playText`** — `MorseGenerator` owns its text
+  copy (`src/morse_generator.h:120`). `playText()` calls
+  `_playText.assign(text)` instead of borrowing the caller's
+  pointer; `strlen(_playText)` calls in `advanceToNextElement()`
+  became `_playText.size()`. No behaviour change for callers; the
+  decoder now matches what was actually sent.
+
+Covered by `test_poll_skips_when_consumer_busy` and
+`test_poll_consults_can_accept_each_cycle` in
+`test/test_winkey_bridge/test_winkey_bridge.cpp`.
+
+### 13.7 Known behaviour with RUMlogNG
+
+- RUMlogNG sets the WK speed *locally* in its own logger UI for the
+  "CW Type Ahead" window — see its **CW → Settings** panel. When you
+  type into the logger's outgoing-CW field, RUMlogNG streams the
+  text as ASCII bytes over the WK line, and the A1Keyer's
+  `cbSetWpm` is *not* called unless RUMlogNG explicitly issues a
+  `0x02 N` SetSpeed command (which it does only at initialisation
+  or on user action). To make the A1Keyer display match the
+  logger's outgoing speed, you have to set the speed on the
+  A1Keyer side too (or use RUMlogNG's "Send speed" feature if
+  present). This is not a bug in A1Keyer; it's the same behaviour
+  every WK2 emulator shows with this logger.
+- RUMlogNG sends the text character-by-character (no word-framing),
+  and with the fix above the bridge accumulates the stream into
+  one playback chunk, so the audio is smooth and the display
+  matches what was sent.
+
+---
+
+## 14. Pin and event reporting
+
 Beyond the 8-bit status byte (§ 12), the bridge can send **pin-event
 bytes** for things like speed-pot value changes, pushbutton transitions,
 and paddle edges. Hosts (especially CW skimmers) use these.
