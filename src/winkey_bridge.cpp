@@ -180,6 +180,12 @@ void WinkeyBridge::appendText(uint8_t byte) {
     // half-space; pass it through — the generator treats it as text.
     if (byte >= 'a' && byte <= 'z') byte = (uint8_t)(byte - 32);
     _buffer.push((char)byte);
+    // Echo the byte back to the host IMMEDIATELY, not later when the
+    // buffer is drained for keying. This matches the K1EL WK2 chip:
+    // hosts use the echo to track which characters are in the send
+    // buffer (a backspaced char still gets echoed when it was first
+    // received, then BS is silent — see test_backspace_silent_echo).
+    emit(byte);
 }
 
 void WinkeyBridge::handleAdmin(uint8_t sub) {

@@ -6,8 +6,8 @@ switched on the device with the **'D' key**:
 
 | Mode | Purpose | Default |
 |---|---|---|
-| **Console** (dev) | Firmware upload, `pio device monitor`, debug logs | ✅ |
-| **WinKey** | Speaks the K1EL WinKeyer WK2 protocol for a logger (RUMlogNG, N1MM, fldigi) | |
+| **Console** (dev) | Firmware upload, `pio device monitor`, debug logs | |
+| **WinKey** | Speaks the K1EL WinKeyer WK2 protocol for a logger (RUMlogNG, N1MM, fldigi) | ✅ |
 
 Press **D** on the Cardputer keyboard to toggle. The status line shows
 a **`WK`** tag (accent colour) while in WinKey mode.

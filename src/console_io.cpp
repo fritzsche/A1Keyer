@@ -10,16 +10,38 @@
 #ifndef UNIT_TEST
 
 #include <Arduino.h>
+#include <HWCDC.h>
 #include <cstdio>
+#include "Log.h"
 #if ENABLE_WIFI_DEBUG
 #include "log_ring.h"
 #endif
 
 namespace {
 
-constexpr size_t kRingSize = 2048;   // replay buffer for WinKey-mode logs
+// kRingSize is the hard cap on the in-RAM replay buffer that captures
+// every Console::write() byte while in WinKey mode. When the operator
+// toggles back to Console mode the ring is drained onto the wire. The
+// size is deliberately small (2 KB) — enough to retain a representative
+// slice of recent activity, never enough to balloon memory. For full
+// history while in WinKey mode, use the HTTP /log endpoint (LogRing is
+// a separate 4 KB ring, also evict-oldest, populated by the same tap).
+constexpr size_t kRingSize = 2048;
 
-Console::Mode _mode = Console::Mode::Console;
+Console::Mode _mode = Console::Mode::WinKey;
+
+// Private CDC instance. ARDUINO_USB_CDC_ON_BOOT=0 (see platformio.ini)
+// leaves the USB-Serial-JTAG peripheral in its ROM-emitted JTAG state at
+// boot, so the framework does NOT define the global `HWCDCSerial`. The
+// `HWCDC` *class* is always available (HWCDC.h line 46 declares it
+// whenever SOC_USB_SERIAL_JTAG_SUPPORTED), so we instantiate our own.
+// All Console I/O goes through this instance; the framework's `Serial`
+// (Serial0 / UART0) is intentionally untouched. There is only one USB
+// CDC peripheral on the chip, so the static buffers inside HWCDC.cpp
+// (tx_ring_buf, rx_queue) are bound to that single hardware endpoint —
+// having one `HWCDC` instance vs. the framework's default global
+// doesn't change anything at the hardware level.
+HWCDC _cdc;
 
 // Evict-oldest ring buffer (models the MorseModel decoded-text ring).
 char   _ring[kRingSize];
@@ -42,13 +64,14 @@ void ringPush(uint8_t b) {
 
 // Replay the ring to the wire and clear it. Called on WinKey → Console.
 //
-// MUST be called with _mux RELEASED. Serial.write() on USB-Serial-JTAG
-// blocks on a FreeRTOS ring buffer (xRingbufferSend), which parks the task
-// on an event list. Doing that inside portENTER_CRITICAL() disables
-// interrupts, so the tick and the USB ISR that would drain the FIFO can
-// never run — the task blocks forever and the interrupt watchdog panics
-// the core. We therefore copy out of the ring in small chunks under short
-// critical sections and write each chunk with the lock released.
+// MUST be called with _mux RELEASED. _cdc.write() on USB-Serial-JTAG
+// blocks on a FreeRTOS ring buffer (xRingbufferSend), which parks the
+// task on an event list. Doing that inside portENTER_CRITICAL()
+// disables interrupts, so the tick and the USB ISR that would drain the
+// FIFO can never run — the task blocks forever and the interrupt
+// watchdog panics the core. We therefore copy out of the ring in small
+// chunks under short critical sections and write each chunk with the
+// lock released.
 void ringReplay() {
     char hdr[48];
     portENTER_CRITICAL(&_mux);
@@ -59,7 +82,7 @@ void ringReplay() {
     int n = snprintf(hdr, sizeof(hdr),
                      "\r\n--- %u buffered log bytes ---\r\n",
                      (unsigned)pending);
-    if (n > 0) Serial.write((const uint8_t*)hdr, (size_t)n);
+    if (n > 0) _cdc.write((const uint8_t*)hdr, (size_t)n);
 
     for (;;) {
         char   chunk[64];
@@ -72,30 +95,36 @@ void ringReplay() {
         }
         portEXIT_CRITICAL(&_mux);
         if (n2 == 0) break;
-        Serial.write((const uint8_t*)chunk, n2);   // lock released here
+        _cdc.write((const uint8_t*)chunk, n2);   // lock released here
     }
 
-    Serial.write((const uint8_t*)"\r\n--- end buffered ---\r\n", 24);
+    _cdc.write((const uint8_t*)"\r\n--- end buffered ---\r\n", 24);
 }
 
 }  // namespace
 
 void Console::begin() {
-    // No-op for the USB-Serial-JTAG peripheral (BOARD_CARDPUTER +
-    // ARDUINO_USB_CDC_ON_BOOT=1 + ARDUINO_USB_MODE=1). The Arduino
-    // core already installs the CDC driver and maps `Serial` to it
-    // during boot, BEFORE setup() runs. The historical Serial.begin()
-    // call here has been removed because the SET_LINE_CODING control
-    // transfer can block on some hosts (Windows before driver load,
-    // macOS while the CDC ACM driver is still claiming the interface),
-    // and that block left the rest of setup() — display, keyboard —
-    // unreachable until the user opened a serial monitor or pressed
-    // reset. The mode gate in this TU only needs to be constructed;
-    // it does not require an explicit Serial.begin().
+    // Late CDC init. With ARDUINO_USB_CDC_ON_BOOT=0 (see platformio.ini)
+    // the framework's `printBeforeSetupInfo()` does NOT bring up the CDC
+    // peripheral, so `Serial` stays aliased to Serial0 (UART0, no
+    // physical pins on Cardputer) and the USB-Serial-JTAG peripheral
+    // remains in its ROM-emitted JTAG state. That keeps macOS's CDC
+    // enumeration clean (the host sees a stable device descriptor until
+    // we explicitly switch to CDC mode below).
     //
-    // If a future port (e.g. Tab5 with the external USB-OTG peripheral)
-    // needs a different bring-up, restore the Serial.begin() there.
-    (void)0;
+    // We bring up our own HWCDC instance (`_cdc`) AFTER M5.begin() has
+    // settled pin ownership (see main.cpp::setup()), to avoid the
+    // peripheral-manager pin-dance race that left the Mac's CDC driver
+    // bound to a stale descriptor and required a manual reset.
+    //
+    // We deliberately do NOT call `_cdc.setDebugOutput(true)`. That would
+    // reroute framework ets_printf traffic (log_e/log_w/log_i/log_d) into
+    // our CDC TX, bypassing the mode gate and corrupting the WinKey
+    // protocol stream when a framework log fires during a WinKey session.
+    // Framework logs continue to flow via the chip's default ets_putc2
+    // path (UART0 TX → USB-Serial-JTAG mirror), which is independent of
+    // our CDC and cannot interfere with WK2 bytes.
+    _cdc.begin(115200);
 }
 
 Console::Mode Console::mode() {
@@ -113,7 +142,7 @@ void Console::setMode(Mode m) {
         // released. Flipping first matters twice over: concurrent loggers
         // go straight to the wire instead of refilling the ring (a chatty
         // task would otherwise keep the drain loop alive indefinitely),
-        // and ringReplay() is free to block in Serial.write() because no
+        // and ringReplay() is free to block in _cdc.write() because no
         // critical section is held. Cost is that a log line raced in
         // during replay may interleave with the buffered text — cosmetic.
         portENTER_CRITICAL(&_mux);
@@ -133,7 +162,7 @@ void Console::setMode(Mode m) {
 
 void Console::write(uint8_t byte) {
     if (_mode == Mode::Console) {
-        Serial.write(byte);
+        _cdc.write(byte);
     } else {
         portENTER_CRITICAL(&_mux);
         ringPush(byte);
@@ -150,7 +179,7 @@ void Console::write(uint8_t byte) {
 
 void Console::write(const uint8_t* data, size_t len) {
     if (_mode == Mode::Console) {
-        Serial.write(data, len);
+        _cdc.write(data, len);
     } else {
         portENTER_CRITICAL(&_mux);
         for (size_t i = 0; i < len; ++i) ringPush(data[i]);
@@ -172,20 +201,28 @@ void Console::vprintf(const char* fmt, va_list args) {
 void Console::rawWinkeyWrite(uint8_t byte) {
     // Always to the wire, regardless of mode. Only the WinkeyBridge calls
     // this, and only while in WinKey mode.
-    Serial.write(byte);
+    _cdc.write(byte);
+
+    // Protocol-trace tap. Logged as a single byte per line so the wire
+    // activity is greppable from the serial monitor and from the HTTP
+    // /log endpoint while in WinKey mode (the LogRing tap is below in
+    // Console::write, but rawWinkeyWrite bypasses that — we mirror it
+    // here explicitly). One [INFO] line per byte keeps the format simple
+    // for offline parsers.
+    Log::info("[WK2 TX] %02X", byte);
 }
 
 int Console::available() {
-    return Serial.available();
+    return _cdc.available();
 }
 
 int Console::read() {
-    return Serial.read();
+    return _cdc.read();
 }
 
 #else  // UNIT_TEST — host passthrough stub (no Arduino, no output)
 
-namespace { Console::Mode _mode = Console::Mode::Console; }
+namespace { Console::Mode _mode = Console::Mode::WinKey; }
 
 void         Console::begin() {}
 Console::Mode Console::mode() { return _mode; }

@@ -53,12 +53,10 @@ void cbSendText(const char* text, void* /*ctx*/) {
         MorseModel::instance().setMode(KeyerMode::ENCODER);
         gen->playText(text);
     }
-    // WK2 echoes each sent character back to the host. The chip does this
-    // as each char is keyed; we approximate by echoing the chunk now
-    // (loggers use the echo to track send progress, not exact timing).
-    for (const char* p = text; *p; ++p) {
-        WinkeySerial::write((uint8_t)*p);
-    }
+    // Echo is now handled in WinkeyBridge::appendText (per-byte,
+    // K1EL-compliant — the chip echoes each text char when received, not
+    // when keyed). We deliberately do not re-echo here; otherwise hosts
+    // would see each character twice.
 }
 
 void cbStopSending(void* /*ctx*/) {
@@ -78,7 +76,7 @@ void Winkey::begin() {
     cb.stopSending     = &cbStopSending;
     cb.ctx             = nullptr;
     _bridge.begin(&wkOut, nullptr, cb);
-    Log::info("[WK] WinkeyBridge ready (press 'D' to enter WinKey mode)");
+    Log::info("[WK] WinkeyBridge ready (WinKey is the default; press 'D' for Console/debug mode)");
 }
 
 void Winkey::poll() {
@@ -93,6 +91,12 @@ void Winkey::poll() {
     while (WinkeySerial::available() > 0 && guard-- > 0) {
         int b = WinkeySerial::read();
         if (b < 0) break;
+        // Protocol-trace tap. One [INFO] line per byte so the wire
+        // activity is greppable from the serial monitor and from the
+        // HTTP /log endpoint (Log::info → Console::write → LogRing when
+        // ENABLE_WIFI_DEBUG=1). Pairs with the [WK2 TX] tap in
+        // Console::rawWinkeyWrite() for a full duplex trace.
+        Log::info("[WK2 RX] %02X", b);
         _bridge.feed((uint8_t)b);
     }
     _bridge.poll();

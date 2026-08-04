@@ -204,20 +204,24 @@ The version byte is `0x07`.
 
 ### 4.2 Echo behavior
 
-The chip echoes each **sent text character** back to the host — but
-crucially it echoes it **after** the character has been keyed as CW, not
-when the byte is received, and it does **not** echo command or parameter
-bytes. Hosts use this echo to track send progress.
+The chip echoes each **received text character** back to the host — i.e.
+echo happens at receive time, not after the character is keyed as CW.
+A byte that is later removed from the buffer (e.g. by `0x08` backspace)
+has already been echoed by the time the BS arrives; the BS itself is
+silent. Command and parameter bytes are never echoed. Hosts use the
+echo to track which characters are queued in the send buffer.
 
 | Chip | Character echo |
 |---|---|
 | WK1 | off |
-| WK2 | on (text chars, after keying) |
+| WK2 | on (text chars, at receive time) |
 | WK3 | on (configurable) |
 
-A1Keyer's bridge emulates WK2 echo: the device glue echoes each sent
-character (the earlier "echoes every byte including commands" model was
-wrong — commands/params are silent, only text is echoed).
+A1Keyer's bridge emulates WK2 echo: `WinkeyBridge::appendText()` calls
+`emit(byte)` as each text byte is added to the send buffer, and the
+device glue (`src/winkey.cpp::cbSendText`) deliberately does not
+re-echo when `poll()` drains the buffer for keying (a double-echo
+would confuse real contest loggers).
 
 ### 4.3 Wire-level framing
 

@@ -98,15 +98,14 @@ void CardputerDisplay::updateStatusLine(MorseModel& model) {
     M5.Display.setCursor(0, 3);
     M5.Display.print(modeStr);
 
-    // WinKey-mode indicator: a compact "WK" tag when the serial line is in
-    // WinKey mode (speaking the WinKeyer protocol to a host logger). Drawn
-    // in the accent colour so it stands out; hidden in Console/dev mode.
-    if (model.winkeyMode()) {
-        M5.Display.setTextColor(COLOR_ACCENT);
-        M5.Display.setCursor(52, 3);
-        M5.Display.print("WK");
-        M5.Display.setTextColor(COLOR_FG);
-    }
+    // Mode indicator: shows "WK" while the serial line is speaking the
+    // WinKeyer protocol to a host logger (RUMlogNG), "DBG" while it is
+    // carrying free-form debug logs. Drawn in the accent colour so it
+    // stands out from the surrounding WPM / freq / vol readout.
+    M5.Display.setTextColor(COLOR_ACCENT);
+    M5.Display.setCursor(52, 3);
+    M5.Display.print(model.winkeyMode() ? "WK" : "DBG");
+    M5.Display.setTextColor(COLOR_FG);
 
     // Middle: compact WPM / FREQ / VOL display
     M5.Display.setCursor(65, 3);

@@ -532,8 +532,10 @@ private:
     // Radio keying output (default OFF for safety — must be user-enabled)
     std::atomic<bool> _radioKeyingEnabled{false};
 
-    // WinKey/Console mode indicator (default false = Console/dev mode)
-    std::atomic<bool> _winkeyMode{false};
+    // WinKey/Console mode indicator (default true = WinKey mode so the
+    // device starts speaking the WK2 protocol to a host logger on cold
+    // boot; operator toggles to Console/debug with the 'D' key).
+    std::atomic<bool> _winkeyMode{true};
 
     // Keyer pattern percentage — written by audio thread
     std::atomic<int> _keyerPct{0};

@@ -137,7 +137,9 @@ static void handleKeyboard() {
     // D → toggle Console (development) mode ↔ WinKey mode. In WinKey mode
     // the single USB serial port speaks the WinKeyer WK2 protocol to a
     // host logger (RUMlogNG); debug output is buffered and replayed when
-    // switching back to Console mode. Default is Console mode.
+    // switching back to Console mode. Default is WinKey mode (the bridge
+    // is "always on"; the operator enters Console mode for firmware upload
+    // or `pio device monitor`).
     if (dKey && !wasD) {
         bool toWinkey = (Console::mode() != Console::Mode::WinKey);
         Console::setMode(toWinkey ? Console::Mode::WinKey
@@ -322,19 +324,15 @@ static void handleKeyboard() {
 }
 
 void setup() {
-    // Bring up the USB-CDC peripheral ourselves, at the TOP of setup().
-    //
-    // ARDUINO_USB_CDC_ON_BOOT is 0 (see platformio.ini) so the framework
-    // does NOT call Serial.begin() in printBeforeSetupInfo() or in
-    // app_main() before we get here — that early init is what hung the
-    // boot on hosts where no serial monitor was open (issue #9004). Doing
-    // it here is safe because HWCDC::begin() on the ARDUINO_USB_MODE=1
-    // path does NOT issue a SET_LINE_CODING control transfer (that was
-    // the TinyUSB USBCDC path, which we no longer use). It just sets up
-    // the ring buffers, configures the USB PHY, and arms the IN_EMPTY
-    // interrupt. See src/console_io.cpp for the related Console-mode
-    // design (the WinKey replay ring).
-    Serial.begin(115200);
+    // NOTE: we deliberately do NOT call Serial.begin() here. With
+    // ARDUINO_USB_CDC_ON_BOOT=0 (see platformio.ini) `Serial` is aliased
+    // to Serial0 (UART0), which has no physical pins on the Cardputer —
+    // a Serial.begin(115200) call would be a no-op against the wrong
+    // peripheral. The CDC peripheral that the WinKeyer bridge uses is
+    // brought up later by Console::begin() — see below — after M5 has
+    // settled pin ownership, so the macOS CDC driver sees a stable
+    // enumeration (no peripheral-manager pin-dance race during early
+    // boot).
 
     auto cfg = M5.config();
     cfg.internal_spk = false;
@@ -344,6 +342,14 @@ void setup() {
     Log::write("[setup] M5.getBoard() = %d\n", (int)M5.getBoard());
     M5Cardputer.begin(true);
 #endif
+
+    // Bring up the CDC peripheral for Console/WinKey I/O AFTER M5 has
+    // claimed whatever pins it needs. Doing this earlier (e.g. as the
+    // very first line of setup()) triggered a macOS enumeration race
+    // where the host's CDC driver bound to a stale descriptor and
+    // required a manual reset to recover. See docs/winkey_test.md §
+    // "The USB-CDC startup issue" for the full trace.
+    Console::begin();
 
     // Bring the display up BEFORE the rest of the heavy init, so the
     // user sees the device is alive immediately on plug-in. If audio
