@@ -51,6 +51,20 @@ WinkeyBridge makeBridge() {
 void open(WinkeyBridge& b) {
     b.feed(0x00); b.feed(0x02);   // Host Open → version reply
     b.feed(0x00); b.feed(0x0B);   // Enter WK2 status mode
+    // Probe so the bridge primes its text gate. Real hosts (RUMlogNG,
+    // N1MM) send GET_POT and/or REQ_STATUS as part of their init; the
+    // spy tests that follow need text bytes to flow normally, so we
+    // prime here. See docs/winkey.md § 13.9.
+    b.feed(0x07);                 // GET_POT → 0x80 reply, _primed = true
+    g_spy.out.clear();
+}
+
+// Host-open WITHOUT priming — used by tests that probe the unprimed
+// state explicitly (e.g. verifying that text bytes arriving before
+// the host's first GET_POT/REQ_STATUS are swallowed).
+void openUnprimed(WinkeyBridge& b) {
+    b.feed(0x00); b.feed(0x02);   // Host Open → version reply
+    b.feed(0x00); b.feed(0x0B);   // Enter WK2 status mode
     g_spy.out.clear();
 }
 
@@ -220,6 +234,8 @@ static void test_reset_restores_defaults_keeps_open() {
     CHECK_EQ(b.wpm(), 25);
 
     // Text after reset must still echo (not be dropped as "before open").
+    // Real hosts re-probe after a defensive reset, so we re-prime here.
+    b.feed(0x07);                                // GET_POT → re-prime
     feedText(b, "CQ");
     b.poll();
     CHECK_STR_EQ(g_spy.lastSend.c_str(), "CQ");
@@ -297,6 +313,86 @@ static void test_ptt_times_consumes_two_params() {
     CHECK_STR_EQ(g_spy.lastSend.c_str(), "A");
 }
 
+// ─── Primed gate: text bytes received before the host has probed us ─────
+//
+// RUMlogNG's init sequence streams a stray text byte ('D' = 0x44) from
+// its outgoing-CW buffer between the Host-Open reply and the first
+// GET_POT / REQ_STATUS probe. Without the primed gate that byte lands
+// in the send buffer and is keyed as CW at boot — the user hears "D"
+// without having typed anything. The gate suppresses text until we've
+// answered at least one probe query. See docs/winkey.md § 13.9.
+
+static void test_text_ignored_before_primed() {
+    WinkeyBridge b = makeBridge();
+    openUnprimed(b);
+    CHECK(b.isOpen());
+    CHECK(!b.isPrimed());
+    feedText(b, "D");
+    b.poll();
+    CHECK_EQ(g_spy.sendCnt, 0);   // NOT sent
+}
+
+static void test_text_accepted_after_get_pot() {
+    WinkeyBridge b = makeBridge();
+    openUnprimed(b);
+    b.feed(0x07);                 // GET_POT → 0x80 reply, primed
+    CHECK(b.isPrimed());
+    feedText(b, "A");
+    b.poll();
+    CHECK_STR_EQ(g_spy.lastSend.c_str(), "A");
+}
+
+static void test_text_accepted_after_req_status() {
+    WinkeyBridge b = makeBridge();
+    openUnprimed(b);
+    b.feed(0x15);                 // REQ_STATUS → statusByte reply, primed
+    CHECK(b.isPrimed());
+    feedText(b, "A");
+    b.poll();
+    CHECK_STR_EQ(g_spy.lastSend.c_str(), "A");
+}
+
+static void test_rumlog_init_does_not_play_text() {
+    // Replay the byte sequence RUMlogNG streams at open. The 0x44
+    // ('D') that arrives between sidetone and pinconfig must NOT be
+    // keyed — only the "A" the user types later (after GET_POT has
+    // primed us) should reach the send hook.
+    WinkeyBridge b = makeBridge();
+    openUnprimed(b);
+    // RUMlogNG init: sidetone, then a stray admin+text pair,
+    // then pinconfig + the rest of the parameter commands, then
+    // GET_POT and REQ_STATUS.
+    b.feed(0x01); b.feed(0x10);   // sidetone
+    b.feed(0x00); b.feed(0x0E); b.feed(0x44); // admin 14 + leaked 'D'
+    b.feed(0x09); b.feed(0x04);   // pinconfig
+    b.feed(0x05); b.feed(0x12); b.feed(0x16); b.feed(0x00); // set-pot
+    b.feed(0x03); b.feed(0x32);   // weighting
+    b.feed(0x0D); b.feed(0x1A);   // farnsworth
+    b.feed(0x04); b.feed(0x00); b.feed(0x00); // PTT times
+    b.feed(0x11); b.feed(0x00);   // key comp
+    b.feed(0x17); b.feed(0x32);   // ratio
+    b.feed(0x07);                 // GET_POT → primed
+    CHECK(b.isPrimed());
+    // User-typed text AFTER the probe:
+    feedText(b, "A");
+    b.poll();
+    CHECK_STR_EQ(g_spy.lastSend.c_str(), "A");
+}
+
+static void test_reset_clears_primed() {
+    // After a soft reset the host is expected to re-probe; the gate
+    // must drop back to "unprimed" so any text the host accidentally
+    // sends during its reset-init sequence is again swallowed.
+    WinkeyBridge b = makeBridge();
+    open(b);
+    CHECK(b.isPrimed());
+    b.feed(0x00); b.feed(0x01);   // soft reset
+    CHECK(!b.isPrimed());
+    feedText(b, "X");
+    b.poll();
+    CHECK_EQ(g_spy.sendCnt, 0);
+}
+
 int main() {
     RUN(test_host_open_returns_version);
     RUN(test_commands_ignored_before_open);
@@ -317,5 +413,10 @@ int main() {
     RUN(test_poll_skips_when_consumer_busy);
     RUN(test_poll_consults_can_accept_each_cycle);
     RUN(test_ptt_times_consumes_two_params);
+    RUN(test_text_ignored_before_primed);
+    RUN(test_text_accepted_after_get_pot);
+    RUN(test_text_accepted_after_req_status);
+    RUN(test_rumlog_init_does_not_play_text);
+    RUN(test_reset_clears_primed);
     return test_summary();
 }

@@ -124,6 +124,30 @@ private:
     bool   _elKeyDown = false;
     int    _elRampSamples = 0;
 
+    // Chunk-boundary tracking for inter-character silence. The
+    // MorseEncoder only emits CHAR_SPACE *between* characters within
+    // a single encode() call — it never emits a trailing CHAR_SPACE
+    // after the last character. When the bridge streams text in
+    // multiple bursts (RUMlogNG sends "T" then later "U"), each
+    // burst becomes a separate playText() call; without the fix
+    // below, "U" would start immediately after T's DAH with no
+    // inter-character silence, producing "TU" as "T·U" (shorter
+    // than the spec's 3-unit CHAR_SPACE). See docs/winkey.md § 13.6.
+    //   _wasPlaying               — true after the first playText()
+    //                                that started a fresh playback.
+    //                                Reset by stop() and by the
+    //                                constructor; only set true
+    //                                inside playText().
+    //   _endedWithBoundarySilence — true when the last element of
+    //                                the *previous* chunk was a
+    //                                CHAR_SPACE or WORD_SPACE (i.e.
+    //                                already includes the inter-
+    //                                character / inter-word gap).
+    //                                When true, the next playText()
+    //                                does NOT prepend another.
+    bool   _wasPlaying = false;
+    bool   _endedWithBoundarySilence = false;
+
     // Sine phase for tone generation
     float  _phase = 0.0f;
     float  _phaseInc = 0.0f;

@@ -83,6 +83,14 @@ public:
     /// admin are ignored until then.
     bool isOpen() const { return _open; }
 
+    /// True once the host has completed its initial probe by asking us a
+    /// question that we answer (GET_POT → 0x80, REQ_STATUS → statusByte).
+    /// Until then, text bytes are silently swallowed even though `_open`
+    /// is true. This suppresses host-init artefacts like RUMlogNG
+    /// streaming bytes from its outgoing-CW buffer during the very first
+    /// few ms after open — see docs/winkey.md § 13.9.
+    bool isPrimed() const { return _primed; }
+
     /// WK version byte reported on host-open. 0x17 = WK2 rev 2.3.
     static constexpr uint8_t kVersion = 0x17;
 
@@ -131,6 +139,7 @@ private:
     // Protocol state
     bool    _open        = false;
     bool    _wk2Mode     = false;
+    bool    _primed      = false;   // set true after first GET_POT/REQ_STATUS reply
     Parse   _parse       = Parse::IDLE;
     uint8_t _pendingCmd  = 0;
     uint8_t _params[3]   = {0, 0, 0};    // max param count we handle is 3 (pot)

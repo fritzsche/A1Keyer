@@ -25,10 +25,19 @@ public:
     /** A single morse element with its duration in morse units. */
     struct Element {
         enum Type : int8_t {
+            // IMPORTANT: values must be UNIQUE. The chunk-boundary
+            // detection in MorseGenerator::advanceToNextElement compares
+            // _elements.back().type against CHAR_SPACE / WORD_SPACE to
+            // decide whether the chunk ended with silence. If the mark
+            // types (DIT/DAH) shared a numeric value with the silence
+            // types (ELEMENT_SPACE/CHAR_SPACE), any DAH would falsely
+            // register as a CHAR_SPACE and the next playText() would
+            // skip its leading-silence prepend. See docs/winkey.md
+            // §13.6 for the symptom.
             DIT          = 1,   ///< 1-unit mark (key-down)
             DAH          = 3,   ///< 3-unit mark (key-down)
-            ELEMENT_SPACE = 1,  ///< 1-unit intra-character space (key-up)
-            CHAR_SPACE   = 3,  ///< 3-unit inter-character space (key-up)
+            ELEMENT_SPACE = 2,  ///< 1-unit intra-character space (key-up)
+            CHAR_SPACE   = 4,  ///< 3-unit inter-character space (key-up)
             WORD_SPACE   = 7,  ///< 7-unit inter-word space (key-up)
         };
         Type  type;

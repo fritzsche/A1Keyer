@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **WinKey prime gate: stray bytes from RUMlogNG's init sequence
+  are no longer keyed as CW at boot.** The wire trace from RUMlogNG
+  (captured on the live device) shows the host sends
+  `00 02 00 0B 00 0F 00 01 01 10 00 0E 44 09 04 ... 07 15` during
+  open. Our parser correctly consumed every command and parameter,
+  but the `00 0E` (admin 14, "Send Standalone Message" — ignored by
+  A1Keyer, no standalone messages stored) was followed immediately
+  by `0x44` = 'D', which the parser then routed as text into the
+  send buffer. `cbSendText("D")` played `-..` at boot and the
+  display lit up with a character the user hadn't typed.
+  RUMlogNG streams bytes from its outgoing-CW buffer during its
+  init, so any text pre-populated there was being keyed
+  unsolicited. Fix: `WinkeyBridge` now ignores text bytes until
+  the host has probed us with `GET_POT` (0x07) or `REQ_STATUS`
+  (0x15) — both of which every shipping WK2 host sends as part of
+  its init. The gate resets on soft reset so a defensive
+  `0x00 0x01` from the host re-enters the unprimed state. Five new
+  unit tests in `test/test_winkey_bridge/` cover the gate; full
+  trace in `docs/winkey.md § 13.9`.
 - **WinKey soft reset no longer closes the host interface.**
   `WinkeyBridge::handleAdmin(ADMIN_RESET)` previously called
   `resetForTest()`, which set `_open=false`. RUMlogNG (and every
@@ -48,6 +67,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fix replaces the raw pointer with a `std::string` and copies
   the text on `playText()`. No behavioural change for callers;
   decoder text now matches what was actually sent.
+- **Inter-character silence is preserved across chunk
+  boundaries.** RUMlogNG (and other WK2 hosts) often streams
+  text in multiple bursts — e.g. `"UR 5NN"` then a pause then
+  `" TU"` — and the user reported that `TU` sounded like `T·U`
+  (no inter-character gap) while `"599 TU"` (with a space
+  before the final word) played correctly. Root cause:
+  `MorseEncoder::encode()` only emits `CHAR_SPACE` *between*
+  characters within one `encode()` call, never after the last
+  character, so the bridge's second `sendText()` had no leading
+  silence. The fix tracks `_endedWithBoundarySilence` in
+  `MorseGenerator` and prepends a `CHAR_SPACE` to the next
+  chunk when the previous one ended without one
+  (`src/morse_generator.cpp:89`). `stop()` resets the tracking
+  so an intentional reset never inherits a synthetic gap. A
+  latent bug made this fix invisible at first:
+  `MorseEncoder::Element::Type` had value collisions between
+  the mark types (`DIT=1`, `DAH=3`) and the silence types
+  (`ELEMENT_SPACE=1`, `CHAR_SPACE=3`); the boundary-type
+  comparison `(lastType == CHAR_SPACE || lastType == WORD_SPACE)`
+  therefore returned TRUE for any chunk ending in a `DAH` and
+  suppressed the prepend. The enum values are now unique
+  (`src/morse_encoder.h`). Covered by three new tests in
+  `test/test_morse_generator/test_morse_generator.cpp`; full
+  trace in `docs/winkey.md § 13.8`.
 
 ### Changed
 - **CI removed.** `.github/workflows/ci.yml` (the matrix of

@@ -79,6 +79,22 @@ void MorseGenerator::playText(const char* text) {
     }
     _charIdx = 0;
     _elements = _encoder.encode(_playText.c_str());
+
+    // Preserve inter-character silence across chunk boundaries.
+    // If the previous chunk ended naturally (not via stop()) AND
+    // did not already emit a trailing CHAR/WORD_SPACE, prepend a
+    // CHAR_SPACE so the host's split-streaming does not eat the
+    // gap. Skip when the encoder produced no elements (empty
+    // input) or when the first element is itself a silence
+    // (would compound an existing gap). See docs/winkey.md § 13.6.
+    if (_wasPlaying && !_endedWithBoundarySilence
+        && !_elements.empty() && _elements.front().keyDown) {
+        MorseEncoder::Element boundary(MorseEncoder::Element::CHAR_SPACE, 3, false);
+        _elements.insert(_elements.begin(), boundary);
+    }
+    _wasPlaying               = true;
+    _endedWithBoundarySilence = false;  // recomputed below in advanceToNextElement
+
     _elIdx = 0;
     _elSamplePos = 0;
     _state = State::PLAYING;
@@ -105,6 +121,10 @@ void MorseGenerator::stop() {
     _elSamplePos = 0;
     _elKeyDown = false;
     _phase = 0.0f;
+    // stop() is an intentional reset — next playText() starts
+    // fresh without a synthetic leading CHAR_SPACE.
+    _wasPlaying = false;
+    _endedWithBoundarySilence = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -127,6 +147,18 @@ void MorseGenerator::advanceToNextElement() {
                 (unsigned char)c >= 32 ? (unsigned char)c : '?', (unsigned)_charIdx);
             MorseModel::instance().appendDecodedChar(c, true);
             ++_charIdx;
+        }
+        // Record whether the last element of THIS chunk was a
+        // boundary silence (CHAR_SPACE or WORD_SPACE). The encoder
+        // emits these only *between* characters within a single
+        // encode() call; a trailing one means the chunk ended at
+        // a character/word boundary, so the next playText() does
+        // not need to prepend another. See docs/winkey.md § 13.6.
+        if (!_elements.empty()) {
+            auto lastType = _elements.back().type;
+            _endedWithBoundarySilence =
+                (lastType == MorseEncoder::Element::CHAR_SPACE
+              || lastType == MorseEncoder::Element::WORD_SPACE);
         }
         _state = State::IDLE;
         _elKeyDown = false;
