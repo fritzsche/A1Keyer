@@ -19,6 +19,8 @@ struct Spy {
     int  outEnCnt     = 0;  bool lastOutputEn = true;
     int  sendCnt      = 0;  std::string lastSend;
     int  stopCnt      = 0;
+    int  canAcceptCnt = 0;         // canAcceptText() probe count
+    bool canAccept    = true;      // return value for canAcceptText()
 };
 
 Spy g_spy;
@@ -29,6 +31,7 @@ void spySidetoneHz(int hz, void*)   { g_spy.lastSidetone = hz; }
 void spyOutEn(bool on, void*)       { g_spy.lastOutputEn = on; ++g_spy.outEnCnt; }
 void spySend(const char* t, void*)  { g_spy.lastSend = t; ++g_spy.sendCnt; }
 void spyStop(void*)                 { ++g_spy.stopCnt; }
+bool spyCanAccept(void*)            { ++g_spy.canAcceptCnt; return g_spy.canAccept; }
 
 WinkeyBridge makeBridge() {
     g_spy = Spy{};
@@ -38,6 +41,7 @@ WinkeyBridge makeBridge() {
     cb.setSidetoneHz   = &spySidetoneHz;
     cb.setOutputEnable = &spyOutEn;
     cb.sendText        = &spySend;
+    cb.canAcceptText   = &spyCanAccept;
     cb.stopSending     = &spyStop;
     b.begin(&spyOut, nullptr, cb);
     return b;
@@ -234,6 +238,53 @@ static void test_reset_for_test_still_closes() {
     CHECK_EQ(b.wpm(), 20);
 }
 
+// ─── canAcceptText gates poll() so back-to-back text accumulates ─────
+// Hosts stream text faster than the audio player can key it. The
+// bridge must NOT restart playback on every byte; instead it
+// accumulates text and the next idle poll drains one bigger chunk.
+// This test mimics the RumlogNG scenario: text arrives in three
+// bursts while canAccept=false, then canAccept=true → single drain.
+static void test_poll_skips_when_consumer_busy() {
+    WinkeyBridge b = makeBridge();
+    open(b);
+    g_spy.canAccept = false;            // consumer mid-playback
+    feedText(b, "C");                    // char 1 → buffered
+    b.poll();
+    CHECK_EQ(g_spy.sendCnt, 0);          // no drain while busy
+    feedText(b, "Q");                    // char 2 → still buffered
+    b.poll();
+    CHECK_EQ(g_spy.sendCnt, 0);
+    feedText(b, " TEST");                // chars 3..7 → still buffered
+    b.poll();
+    CHECK_EQ(g_spy.sendCnt, 0);
+    // Consumer finishes; bridge must now drain the FULL accumulated
+    // chunk in one sendText() call.
+    g_spy.canAccept = true;
+    b.poll();
+    CHECK_EQ(g_spy.sendCnt, 1);
+    CHECK_STR_EQ(g_spy.lastSend.c_str(), "CQ TEST");
+}
+
+// ─── canAcceptText is consulted before each drain attempt ────────────
+// After a successful drain the bridge must still probe before the
+// NEXT drain — i.e. the busy flag is re-checked every poll().
+static void test_poll_consults_can_accept_each_cycle() {
+    WinkeyBridge b = makeBridge();
+    open(b);
+    feedText(b, "A");
+    int probesBefore = g_spy.canAcceptCnt;
+    g_spy.canAccept = true;
+    b.poll();                            // drains "A"
+    CHECK(g_spy.canAcceptCnt > probesBefore);
+    feedText(b, "B");                    // buffer non-empty
+    int probesAfter = g_spy.canAcceptCnt;
+    g_spy.canAccept = false;            // consumer busy again
+    b.poll();                            // must probe AND skip
+    CHECK(g_spy.canAcceptCnt > probesAfter);
+    CHECK_EQ(g_spy.sendCnt, 1);          // still the original "A" drain
+    CHECK_STR_EQ(g_spy.lastSend.c_str(), "A");
+}
+
 // ─── Multi-param command (PTT times, 0x04) consumes both params ─────────
 static void test_ptt_times_consumes_two_params() {
     WinkeyBridge b = makeBridge();
@@ -263,6 +314,8 @@ int main() {
     RUN(test_key_immediate);
     RUN(test_reset_restores_defaults_keeps_open);
     RUN(test_reset_for_test_still_closes);
+    RUN(test_poll_skips_when_consumer_busy);
+    RUN(test_poll_consults_can_accept_each_cycle);
     RUN(test_ptt_times_consumes_two_params);
     return test_summary();
 }

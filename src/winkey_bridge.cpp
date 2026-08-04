@@ -287,6 +287,14 @@ void WinkeyBridge::applyCommand(uint8_t cmd, const uint8_t* p, uint8_t n) {
 
 void WinkeyBridge::poll() {
     if (_buffer.empty()) return;
+    // If the consumer is still playing the previous chunk, do NOT drain.
+    // The text stays in _buffer and the next poll() will drain+send it
+    // as one larger chunk once the consumer is ready. This stops the
+    // per-character audio restart (and the audible click at every
+    // playText() boundary) that we get when hosts stream text faster
+    // than MorseGenerator can play it. See docs/winkey.md "Text
+    // playback and the audio click bug".
+    if (_cb.canAcceptText && !_cb.canAcceptText(_cb.ctx)) return;
     // Drain accumulated text to the send hook as one chunk. The device
     // hook hands it to MorseGenerator (async audio + keying); host tests
     // record the string.

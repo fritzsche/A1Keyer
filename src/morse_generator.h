@@ -22,6 +22,7 @@
 #include "morse_encoder.h"
 #include "fast_math.h"
 #include <cstdint>
+#include <string>
 
 // Forward declaration — MorseModel is defined in display_model.h which
 // transitively includes audio_engine.h (needs ESP-IDF headers).
@@ -110,7 +111,13 @@ private:
     int    _elSamplePos = 0; // current position within the element's envelope
     int    _elTotalSamples = 0; // total samples for current element
     char   _currentChar = 0;   // current character being played (for display)
-    const char* _playText = "";  // original text being played (for display indexing)
+    // _playText is COPIED into the generator, not borrowed by pointer.
+    // The WinKey bridge hands the player a stack-local buffer in
+    // WinkeyBridge::poll(); if we just stored that pointer, the audio
+    // task would walk into freed stack memory and the decoder would
+    // see junk bytes ('#', '?', NUL) instead of the real text. See
+    // docs/winkey.md "Text playback and the audio click bug".
+    std::string _playText;
     size_t _charIdx = 0;    // current character index in _playText
 
     // Current element info

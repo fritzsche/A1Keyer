@@ -25,6 +25,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   starts clean. Matches K3NG and `hamlib/rig/winkey.c`
   behaviour. Documented in `docs/winkey.md § 5.2`; the original
   failing wire trace from RUMlogNG is reproduced there.
+- **WinKey playback no longer restarts the audio player on every
+  byte.** Hosts stream text as fast as the serial line can carry
+  it; the old `poll()` called `cbSendText` for every character,
+  which unconditionally called `MorseGenerator::playText()` and
+  reset the element cursor — producing a per-character audio
+  click and visibly broken playback. The fix adds a
+  `canAcceptText()` query to `WinkeyBridge::Callbacks`. When it
+  returns false (audio player busy), `poll()` skips draining the
+  buffer; text accumulates and the next idle poll drains the
+  whole pending chunk in one `sendText()` call. `cbSendText`
+  itself also re-checks `gen->isPlaying()` as defence in depth.
+  Documented in `docs/winkey.md § "Text playback and the audio
+  click bug"`.
+- **`MorseGenerator::_playText` now owns its buffer, not borrows
+  one.** The previous `const char*` member aliased the
+  stack-local `chunk[]` that `WinkeyBridge::poll()` hands to
+  `cbSendText`. After `cbSendText` returned the chunk was gone,
+  so the audio task read freed stack memory — MorseModel
+  appended garbage bytes (`#`, `?`, NUL) to the decoded-text
+  ring buffer and the display showed the wrong character. The
+  fix replaces the raw pointer with a `std::string` and copies
+  the text on `playText()`. No behavioural change for callers;
+  decoder text now matches what was actually sent.
 
 ### Changed
 - **CI removed.** `.github/workflows/ci.yml` (the matrix of
