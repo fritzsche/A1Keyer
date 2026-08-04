@@ -25,6 +25,7 @@ set(LIB_SOURCES
     src/MorseTable.cpp
     src/key_event_bus.cpp
     src/radio_keyer.cpp
+    src/winkey_bridge.cpp
 )
 
 # ---------------------------------------------------------------------------
@@ -41,6 +42,7 @@ foreach(SUITE IN ITEMS
     test_display_model
     test_key_event_bus
     test_radio_keyer
+    test_winkey_bridge
 )
     add_executable(${SUITE}
         test/${SUITE}/${SUITE}.cpp
