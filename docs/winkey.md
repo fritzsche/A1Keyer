@@ -761,6 +761,184 @@ Covered by `test_poll_skips_when_consumer_busy` and
   one playback chunk, so the audio is smooth and the display
   matches what was sent.
 
+### 13.8 Inter-character silence lost across chunk boundaries
+
+After the §13.6 fix the audio is smooth within a single playback
+chunk, but RUMlogNG (and most other WK2 hosts) does not always send
+the whole message in one chunk. When the host is busy composing the
+next word — or simply paces its serial writes — the bridge sees
+multiple `sendText()` calls back-to-back. The user reported the
+symptom as: in `"UR 5NN TU"` the `T` and `U` run together with no
+gap between them, but in `"UR 599 TU"` (extra space before `TU`)
+the gap is correct.
+
+The cause is in `MorseEncoder::encode()`:
+
+- It only emits a `CHAR_SPACE` element **between** two characters
+  *within the same `encode()` call*.
+- It never emits a trailing `CHAR_SPACE` after the last character in
+  the chunk — there is no "next char" to look ahead at.
+
+So if chunk 1 is `"T"` and chunk 2 is `"U"`:
+
+1. `encode("T")` → `[DAH]` (no trailing silence element).
+2. `MorseGenerator::advanceToNextElement()` processes the `DAH` and
+   returns to `IDLE`.
+3. `encode("U")` → `[DIT, DIT, DAH]` (no leading silence element).
+4. The `DAH` of `T` and the first `DIT` of `U` abut directly,
+   producing a `T·U` sound instead of the spec-mandated 3-unit
+   inter-character gap.
+
+When there is an extra space (e.g. `"599 TU"`), chunk 1 ends with a
+`WORD_SPACE` element which is itself 7 units of silence, so the gap
+is naturally there before chunk 2 starts — the user observes
+"correct spacing" in that case.
+
+The fix has two parts:
+
+1. **Track the boundary type at the end of each chunk.**
+   `MorseGenerator` gains two new private members
+   (`src/morse_generator.h:148`):
+
+   ```cpp
+   bool _wasPlaying               = false;
+   bool _endedWithBoundarySilence = false;
+   ```
+
+   In `advanceToNextElement()`'s all-exhausted branch
+   (`src/morse_generator.cpp:162`), `_endedWithBoundarySilence` is
+   set to true iff `_elements.back().type` is `CHAR_SPACE` or
+   `WORD_SPACE`.
+
+2. **Prepend a `CHAR_SPACE` on the next chunk when needed.**
+   In `playText()` (`src/morse_generator.cpp:89`), if the previous
+   chunk ended naturally (i.e. not via `stop()` — `stop()` resets
+   `_wasPlaying` to false) AND did not already end with a boundary
+   silence, prepend a 3-unit `CHAR_SPACE` element. Skip when the
+   encoder produced no elements or when the first element is itself
+   a silence (would compound an existing gap).
+
+A latent bug made this fix invisible until it was diagnosed:
+`MorseEncoder::Element::Type` previously had **value collisions**
+between mark and space types (`DIT=1`, `ELEMENT_SPACE=1`,
+`DAH=3`, `CHAR_SPACE=3`). The boundary-type check
+`(lastType == CHAR_SPACE || lastType == WORD_SPACE)` was
+incorrectly returning TRUE for any chunk whose last element was a
+`DAH` — exactly the common case — so the prepend was being skipped
+on every multi-char chunk. The enum values are now unique
+(`src/morse_encoder.h`, see the IMPORTANT comment).
+
+Covered by three new tests in
+`test/test_morse_generator/test_morse_generator.cpp`:
+
+- `test_split_chunks_preserve_inter_char_space` — drain `"T"`,
+  playText(`"U"`), assert the first `3 × ditSamples` of audio are
+  silence (the prepended `CHAR_SPACE`).
+- `test_split_with_trailing_space_no_double_gap` — drain `"T "`,
+  playText(`"U"`), assert the first `3 × ditSamples` contain tone
+  (no prepend, because the trailing `WORD_SPACE` already provided
+  the gap; prepending would produce a 10-unit gap instead of 7).
+- `test_stop_resets_prepend_state` — drain `"T"`, `stop()`,
+  playText(`"U"`), assert no prepend (stop is an intentional
+  reset).
+
+### 13.9 Stray bytes from the host's init sequence keyed as CW
+
+The bridge is WK2-compliant: it parses every command and parameter
+correctly, replies to GET_POT (`0x80`) and REQ_STATUS (status
+byte), and echoes text. It is, however, exposed to one class of
+host misbehaviour — bytes from the host's outgoing-CW buffer
+arriving in the middle of its init sequence. The symptom reported
+on A1Keyer hardware: at the moment RUMlogNG is opened, the user
+hears one CW character (e.g. `-..` = "D") that they did not type,
+and the display lights up with that character.
+
+Wire trace captured on the live device:
+
+```
+RX (host → bridge)
+  00 02            Host Open                     ← _open=true, emit 0x17
+  00 0B            Set WK2 mode                  ← _wk2Mode=true
+  00 0F            Admin 15 (Load XMODE)         ← silently ignored
+  00 01            Admin RESET                   ← resetParams(), _open stays true
+  01 10            Sidetone (preset 0, paddle-only flag set)
+  00 0E 44         Admin 14 (Send Standalone Msg) then 0x44 ('D')  ← BUG
+  09 04            PinConfig
+  05 12 16 00      Set Pot (3 params: 0x12, 0x16, 0x00)
+  03 32            Weighting (= 50)
+  0D 1A            Farnsworth (= 26)
+  04 00 00         PTT Times (lead=0, tail=0)
+  11 00            Key Compensation (= 0)
+  17 32            Dit/Dah Ratio (= 50)
+  07               GET_POT                       ← bridge replies 0x80
+  15               REQ_STATUS                    ← bridge replies 0xC4
+```
+
+What happens at `00 0E 44`:
+
+1. `0x00` puts the parser into `ADMIN` state.
+2. `0x0E` is admin sub-command 14 (Send Standalone Message). The
+   bridge ignores it (no standalone messages are stored) and
+   returns to `IDLE`.
+3. `0x44` is then a fresh byte in `IDLE` state. It is `>= 0x20`,
+   so the parser appends it to the send buffer as the text `"D"`
+   and emits the echo `0x44` back to the host.
+4. `cbSendText("D")` fires on the next `poll()`, MorseGenerator
+   plays `D` as `-..`, and MorseModel appends `'D'`.
+
+RUMlogNG is following the WK2 protocol correctly. Admin 14 is
+defined (Send Standalone Message, no params, no reply); the
+following `0x44` is RUMlogNG legitimately streaming the first
+character of its outgoing-CW buffer. A1Keyer's behaviour is also
+"correct" — every byte was parsed in the state the WK2 spec
+mandates. The conflict is a UX one: the user did not press a key,
+yet the device made sound.
+
+**Fix: a "primed" gate on text acceptance.**
+
+`WinkeyBridge` now tracks a `_primed` flag, initialised to
+`false`. It is set to `true` the first time the bridge replies to
+either `WK_GET_POT` (0x07) or `WK_REQ_STATUS` (0x15). The text
+acceptance check in `feed()` becomes:
+
+```cpp
+if (byte >= kTextThreshold) {
+    if (_open && _primed) appendText(byte);
+    return;
+}
+```
+
+Until the host probes us, text bytes are silently dropped
+(`_primed` is `false`). Every shipping WK2 host — RUMlogNG, N1MM
+Logger+, fldigi, WriteLog — issues `0x07` and/or `0x15` as part of
+its init sequence, so legitimate text from a user-typed outgoing
+buffer arrives AFTER the probe and is accepted normally. Soft
+reset (`0x00 0x01`) re-enters the unprimed state because
+`resetParams()` clears the flag; the host is expected to
+re-probe.
+
+The trace above shows the leaked `'D'` arriving 13 bytes before
+`0x07`. With the gate, `'D'` is dropped at the parser and never
+reaches `MorseGenerator`. `MorseModel::appendDecodedChar` is not
+called. The display stays empty until the user actually types.
+
+Tests added in `test/test_winkey_bridge/test_winkey_bridge.cpp`:
+
+- `test_text_ignored_before_primed` — feed text before any probe;
+  assert `sendCnt == 0`.
+- `test_text_accepted_after_get_pot` — feed `0x07` then text;
+  assert `lastSend == "A"`.
+- `test_text_accepted_after_req_status` — same, with `0x15`.
+- `test_rumlog_init_does_not_play_text` — replay the exact
+  RUMlogNG byte sequence above; assert only the post-probe `"A"`
+  reaches the send hook.
+- `test_reset_clears_primed` — prime, then soft reset; assert
+  text is again dropped until the host re-probes.
+
+The change is local to `WinkeyBridge`; the device glue
+(`src/winkey.cpp`), `MorseGenerator`, and `MorseModel` are
+untouched.
+
 ---
 
 ## 14. Pin and event reporting

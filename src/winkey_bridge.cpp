@@ -121,6 +121,14 @@ void WinkeyBridge::resetParams() {
     _weight = 50; _farnsworth = 0; _pttTail = 5; _pttLead = 5;
     _hangTime = 0; _ratio = 50;
     _buffer.clear();
+    // Reset the "primed" gate so any text bytes that arrive between
+    // a host-open (or soft reset) and the host's first probe query
+    // are swallowed. WK2-compliant hosts always probe via GET_POT or
+    // REQ_STATUS, so legitimate text arrives AFTER _primed flips true.
+    // Defends against RUMlogNG sending stray bytes from its outgoing
+    // CW buffer before the host has even confirmed we are alive —
+    // see docs/winkey.md § 13.9.
+    _primed = false;
 }
 
 void WinkeyBridge::emit(uint8_t byte) {
@@ -155,8 +163,13 @@ void WinkeyBridge::feed(uint8_t byte) {
                 return;
             }
             if (byte >= kTextThreshold) {
-                // Text to send as CW. Accepted only after host-open.
-                if (_open) appendText(byte);
+                // Text to send as CW. Accepted only after host-open AND
+                // once the host has probed us with GET_POT or REQ_STATUS
+                // (i.e. _primed). Without the primed gate, RUMlogNG's
+                // outgoing-CW buffer is streamed at open time and the
+                // first character is keyed as CW before the user has
+                // typed anything — see docs/winkey.md § 13.9.
+                if (_open && _primed) appendText(byte);
                 return;
             }
             // Command byte 0x01-0x1F. Commands other than admin require
@@ -268,11 +281,13 @@ void WinkeyBridge::applyCommand(uint8_t cmd, const uint8_t* p, uint8_t n) {
         }
         case WK_REQ_STATUS:
             emit(statusByte());
+            _primed = true;
             return;
         case WK_GET_POT:
             // No physical pot; report current WPM offset as 0 (top bit set
             // per WK convention). Minimal, keeps hosts happy.
             emit(0x80);
+            _primed = true;
             return;
         case WK_SETMODE:      if (n >= 1) _keyerMode  = p[0]; return;
         case WK_WEIGHTING:    if (n >= 1) _weight     = p[0]; return;
