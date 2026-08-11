@@ -119,6 +119,27 @@ void Winkey::poll() {
         _bridge.feed((uint8_t)b);
     }
     _bridge.poll();
+    // Sync MorseModel → bridge → host (K3NG speed-pot pin event).
+    // Cheap: a single atomic counter load + compare, then maybe a
+    // 1-byte emit `(wpm - low) | 0x80`. Drives the device→host half
+    // of the bidirectional WPM sync — see docs/winkey.md § 16.7.
+    // Runs every loop() so keyboard / NVS WPM changes propagate
+    // within one tick.
+    syncWpmFromLocal();
+}
+
+void Winkey::syncWpmFromLocal() {
+    // Polled state machine — only acts when MorseModel's changeCounter
+    // has advanced since the last call. Cheap to call every loop().
+    // The bridge's setWpmFromLocal() short-circuits when the polled
+    // WPM already matches the last value the host sent us, so we do
+    // NOT echo the host's own 0x02 N back at it.
+    static uint32_t lastCounter = UINT32_MAX;
+    auto& model = MorseModel::instance();
+    uint32_t cur = model.changeCounter();
+    if (cur == lastCounter) return;
+    lastCounter = cur;
+    _bridge.setWpmFromLocal(model.wpm());
 }
 
 const WinkeyBridge* Winkey::bridge() {
@@ -129,6 +150,7 @@ const WinkeyBridge* Winkey::bridge() {
 
 void Winkey::begin() {}
 void Winkey::poll() {}
+void Winkey::syncWpmFromLocal() {}
 const WinkeyBridge* Winkey::bridge() { return nullptr; }
 
 #endif  // UNIT_TEST

@@ -57,6 +57,10 @@ ADMIN             = 0x00
 ADMIN_RESET       = 0x01
 ADMIN_HOST_OPEN   = 0x02
 ADMIN_HOST_CLOSE  = 0x03
+ADMIN_GET_VALUES  = 0x07        # K1EL WK2 datasheet v23 § 4 — 14-byte reply
+                                 # with all current settings (WPM at offset 1).
+                                 # Routed via the 0x00 prefix, so no collision
+                                 # with the operating GET_POT (0x07).
 ADMIN_SET_WK1     = 0x0A
 ADMIN_SET_WK2     = 0x0B
 
@@ -671,6 +675,51 @@ def test_buffered_commands_consumed(host: WinkeyHost, http: HttpConsole, p: Prin
     )
 
 
+def test_get_values_reply(host: WinkeyHost, http: HttpConsole, p: Printer) -> TestResult:
+    """0x00 0x07 → 14-byte reply per K1EL WK2 datasheet v23 Table 14.
+    Byte index 1 carries the current WPM. Lets a host populate its UI
+    at open time without having to wait for the next 0x02 N from the
+    device (see docs/winkey.md § 16.7)."""
+    sent = bytes([ADMIN, ADMIN_GET_VALUES])
+    _, rx = host.exchange(sent, expect=14, timeout=0.6)
+    if len(rx) != 14:
+        return TestResult(
+            name="admin_get_values_14_bytes",
+            passed=False,
+            detail=f"got {len(rx)} bytes, expected 14",
+            sent=sent, received=rx,
+        )
+    s = http.state() or {}
+    wpm_observed = s.get("winkeyWpm", -1) if s else -1
+    ok = rx[1] == wpm_observed
+    return TestResult(
+        name="admin_get_values_14_bytes",
+        passed=ok,
+        detail=f"reply byte[1]={rx[1]} HTTP winkeyWpm={wpm_observed}"
+              if not ok else f"14 bytes; byte[1]={rx[1]} matches winkeyWpm",
+        sent=sent, received=rx, http_state=s,
+    )
+
+
+def test_set_wpm_roundtrip_to_state(host: WinkeyHost, http: HttpConsole, p: Printer) -> TestResult:
+    """End-to-end: 0x02 0x1E (30 WPM) from the host lands in MorseModel
+    and is observable via /state.winkeyWpm. Verifies the host→device
+    half of the bidirectional WPM sync (docs/winkey.md § 16.7)."""
+    sent = bytes([SPEED, 30])
+    _, rx = host.exchange(sent, expect=0, timeout=0.4)
+    time.sleep(0.2)
+    s = http.state() or {}
+    wpm = s.get("winkeyWpm", -1) if s else -1
+    ok = (len(rx) == 0) and (wpm == 30)
+    return TestResult(
+        name="set_wpm_30_roundtrips_via_http_state",
+        passed=ok,
+        detail=f"HTTP winkeyWpm={wpm} expected 30" if wpm != 30
+              else "HTTP winkeyWpm=30",
+        sent=sent, received=rx, http_state=s,
+    )
+
+
 # ─── Test plan ─────────────────────────────────────────────────────────
 BASIC_PLAN: List[Callable] = [
     test_host_open,
@@ -696,6 +745,8 @@ ALL_PLAN: List[Callable] = [
     test_get_pot,
     # Parameter commands
     test_set_wpm,
+    test_set_wpm_roundtrip_to_state,
+    test_get_values_reply,
     test_sidetone_preset,
     test_ptt_times_two_params,
     test_setmode_wk1_then_wk2,

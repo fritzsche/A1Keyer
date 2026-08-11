@@ -59,6 +59,12 @@ enum : uint8_t {
     ADMIN_RESET      = 0x01,
     ADMIN_HOST_OPEN  = 0x02,
     ADMIN_HOST_CLOSE = 0x03,
+    ADMIN_GET_VALUES = 0x07,   // K1EL WK2 datasheet v23 § 4 — reply with all
+                                // current settings; the byte value (0x07) is
+                                // in the same numeric range as operating
+                                // WK_GET_POT, but the 0x00 prefix routes it
+                                // here instead — no collision. See
+                                // docs/winkey.md § 16.7.
     ADMIN_SET_WK1    = 0x0A,
     ADMIN_SET_WK2    = 0x0B,
 };
@@ -96,6 +102,36 @@ int WinkeyBridge::sidetoneIndexToHz(uint8_t byte) {
     return kHz[idx];
 }
 
+// K1EL WK2 / K3NG speed-pot byte convention: the high bit (0x80) is
+// the "speed pot changed" indicator; the low 7 bits are the offset
+// from the configured pot-low WPM. K3NG's two emitters both use this
+// encoding (k3ng_cw_keyer/k3ng_keyer/k3ng_keyer.ino:5730 for the live
+// pin-event and :11788 for the GET_POT reply). Hosts (RUMlogNG, N1MM,
+// hamlib) decode via `wpm = low + (byte & 0x7F)`. See docs/winkey.md
+// § 14.1, § 16.7.
+uint8_t WinkeyBridge::speedPotValue() const {
+    int offset = _wpm - _potWpmLow;
+    if (offset < 0)   offset = 0;
+    if (offset > 127) offset = 127;   // 0x80 | 127 = 0xFF (max byte)
+    return (uint8_t)(0x80 | offset);
+}
+
+// Push a local WPM change (keyboard, NVS restore, etc.) into the
+// bridge's mirror and out to the host as a single speed-pot byte
+// (`(wpm - low) | 0x80`). K3NG-compatible loggers (RUMlogNG, N1MM,
+// fldigi) parse this and update their UI to match the operator's
+// choice. Idempotent: when the polled value matches `_lastPushedWpm`
+// (which the WK_SPEED path stamps on every host-initiated change),
+// we skip the emit to avoid echoing the host's own command back. See
+// docs/winkey.md § 16.7.
+void WinkeyBridge::setWpmFromLocal(int wpm) {
+    int clamped = clampi(wpm, 5, 99);
+    if (clamped == _wpm && clamped == _lastPushedWpm) return;
+    _wpm = clamped;
+    _lastPushedWpm = clamped;
+    if (_open) emit(speedPotValue());
+}
+
 void WinkeyBridge::begin(OutputFn out, void* outCtx, const Callbacks& cb) {
     _out = out;
     _outCtx = outCtx;
@@ -120,6 +156,15 @@ void WinkeyBridge::resetParams() {
     _keyerMode = 1;
     _weight = 50; _farnsworth = 0; _pttTail = 5; _pttLead = 5;
     _hangTime = 0; _ratio = 50;
+    // Default pot range matches A1Keyer's effective WPM range; the
+    // host reconfigures this via `0x05` Set Pot. See docs/winkey.md
+    // § 14.1.
+    _potWpmLow  = kWpmMin;
+    _potWpmHigh = kWpmMax;
+    // Clear the "last pushed" tracker so a subsequent local change
+    // (or the host's first probe after reset) re-emits the current
+    // value via setWpmFromLocal(). See docs/winkey.md § 16.7.
+    _lastPushedWpm = -1;
     _buffer.clear();
     // Reset the "primed" gate so any text bytes that arrive between
     // a host-open (or soft reset) and the host's first probe query
@@ -235,8 +280,22 @@ void WinkeyBridge::handleAdmin(uint8_t sub) {
         case ADMIN_HOST_CLOSE:
             _open = false;
             return;
+        case ADMIN_GET_VALUES: {
+            // K1EL WK2 datasheet v23 Table 14: emit a 14-byte reply
+            // with every parameter the host may want at init. We only
+            // have reliable values for the WPM byte (offset 1); the
+            // remaining 13 bytes are zero-filled, which any K3NG-aware
+            // host accepts gracefully. Hosts (RUMlogNG, N1MM) typically
+            // issue this once at open as part of their init probe,
+            // then follow up with `0x02 N` for any subsequent change.
+            // See docs/winkey.md § 16.7.
+            uint8_t reply[14] = {0};
+            reply[1] = (uint8_t)_wpm;
+            for (uint8_t b : reply) emit(b);
+            return;
+        }
         default:
-            // Calibrate, A2D, get-values, EEPROM, baud: accepted-and-
+            // Calibrate, A2D, other get-values, EEPROM, baud: accepted-and-
             // ignored in the core subset (§ 16.6). Note: some of these
             // carry parameters we do not consume here; the core targets
             // the commands real loggers actually send on open.
@@ -249,6 +308,10 @@ void WinkeyBridge::applyCommand(uint8_t cmd, const uint8_t* p, uint8_t n) {
         case WK_SPEED: {
             if (n >= 1 && p[0] != 0) {         // 0 = "use pot"; ignore
                 _wpm = clampi(p[0], 5, 99);
+                // Stamp the host's own value so the next syncWpmFromLocal()
+                // (which sees MorseModel's mirrored WPM) is a no-op —
+                // feedback suppression for the host→keyer path.
+                _lastPushedWpm = _wpm;
                 if (_cb.setWpm) _cb.setWpm(_wpm, _cb.ctx);
             }
             return;
@@ -284,11 +347,28 @@ void WinkeyBridge::applyCommand(uint8_t cmd, const uint8_t* p, uint8_t n) {
             _primed = true;
             return;
         case WK_GET_POT:
-            // No physical pot; report current WPM offset as 0 (top bit set
-            // per WK convention). Minimal, keeps hosts happy.
-            emit(0x80);
+            // K1EL WK2 / K3NG convention: reply with the same single
+            // byte the live pin-event uses — `(wpm - low) | 0x80`. The
+            // 0x80 bit is the documented "speed pot valid" indicator;
+            // the low 7 bits carry the offset from the pot-low WPM.
+            // k3ng_cw_keyer/k3ng_keyer/k3ng_keyer.ino:11786-11795.
+            emit(speedPotValue());
             _primed = true;
             return;
+        case WK_SET_POT: {
+            // WK2 § 8.1: 0x05 <low> <range> <scale>. p[0] is the pot-low
+            // WPM, p[1] is the range (so max WPM = low + range), and p[2]
+            // is the ADC full-scale (0 = 1022, 127 = 511, 255 = 1031,
+            // per K3NG k3ng_keyer.ino:10865-10880). We have no physical
+            // pot so the scale byte is informational only — we store
+            // the WPM range and use it for the (wpm - low) | 0x80
+            // encoding in `speedPotValue()` and `setWpmFromLocal()`.
+            if (n >= 2) {
+                _potWpmLow  = clampi(p[0], 5, 99);
+                _potWpmHigh = clampi(_potWpmLow + p[1], _potWpmLow, 99);
+            }
+            return;
+        }
         case WK_SETMODE:      if (n >= 1) _keyerMode  = p[0]; return;
         case WK_WEIGHTING:    if (n >= 1) _weight     = p[0]; return;
         case WK_FARNSWORTH:   if (n >= 1) _farnsworth = p[0]; return;

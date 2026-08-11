@@ -1,7 +1,7 @@
 .claude/
 .pio
 .vscode/
-
+tmp
 # CMake build output
 build/
 CMakeCache.txt

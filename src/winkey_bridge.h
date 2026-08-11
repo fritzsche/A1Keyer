@@ -114,6 +114,32 @@ public:
     bool outputEnabled() const { return _outputEnable; }
     uint8_t keyerMode() const { return _keyerMode; }
 
+    /// A1Keyer's absolute WPM range. MorseModel clamps to [5, 50];
+    /// the wire-facing clamp stays at the WK2 spec's [5, 99] for
+    /// hosts that send SetSpeed values outside the audio range.
+    static constexpr int kWpmMin = 5;
+    static constexpr int kWpmMax = 50;
+
+    /// Update the bridge's WPM from a local source (keyboard / NVS) and
+    /// emit a single-byte speed-pot-change notification to the host so
+    /// K3NG-compatible loggers (RUMlogNG, N1MM, fldigi) mirror the
+    /// change in their UI. The byte is encoded as
+    /// `(wpm - _potWpmLow) | 0x80` — the documented K1EL WK2 / K3NG
+    /// idiom for "speed pot changed" (top bit set, low 7 bits = the
+    /// offset from the pot's low WPM). No-op before host-open.
+    /// Idempotent — when the polled value matches the last value the
+    /// host sent us (tracked in `_lastPushedWpm`), the emit is
+    /// suppressed so the host never sees its own `0x02 N` echoed back.
+    /// See docs/winkey.md § 14.1, § 16.7.
+    void setWpmFromLocal(int wpm);
+
+    /// Current speed-pot-byte encoding of the bridge WPM. Returns
+    /// `(wpm - _potWpmLow) | 0x80` clamped so the low 7 bits stay in
+    /// [0, 127]. This is the byte emitted by both the local push
+    /// (`setWpmFromLocal`) and by the host's `0x07` GET_POT query.
+    /// See docs/winkey.md § 14.1, § 16.7.
+    uint8_t speedPotValue() const;
+
 private:
     // Parser state: are we mid-command awaiting parameter byte(s)?
     enum class Parse : uint8_t {
@@ -151,6 +177,21 @@ private:
     int     _sidetoneHz  = 600;
     bool    _outputEnable = true;
     uint8_t _keyerMode   = 1;            // 1 = iambic B
+
+    // Last value pushed from local (MorseModel → bridge → host).
+    // -1 forces the next setWpmFromLocal() call to emit
+    // unconditionally once _open is true. Cleared by resetParams().
+    // See docs/winkey.md § 16.7 (feedback suppression).
+    int     _lastPushedWpm = -1;
+
+    // Speed pot range configured by the host via `0x05 <low> <range> <scale>`
+    // (WK2 § 8.1). The low 7 bits of the speed-pot byte are
+    // `(wpm - _potWpmLow)`. Default matches A1Keyer's effective WPM
+    // range [5, 50] so the bridge is usable without host configuration;
+    // a real K1EL Winkeyer's physical pot sets these via the A2D
+    // channels. See docs/winkey.md § 14.1.
+    int     _potWpmLow  = kWpmMin;     // 5
+    int     _potWpmHigh = kWpmMax;     // 50
     // Store-only params (status readback; no audio effect yet — § 16.6)
     uint8_t _weight = 50, _farnsworth = 0, _pttTail = 5, _pttLead = 5;
     uint8_t _hangTime = 0, _ratio = 50;

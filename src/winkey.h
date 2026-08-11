@@ -28,6 +28,15 @@ public:
     /// builds where the bridge is not instantiated.
     static const WinkeyBridge* bridge();
 
+    /// Push MorseModel's current WPM to the bridge (and thus to the
+    /// host) when the model has changed since the last call. Drives
+    /// the device→host side of the bidirectional WPM sync
+    /// (K3NG single-byte speed-pot pin event `(wpm - low) | 0x80`).
+    /// Called from loop() after the bridge drain so the host stays
+    /// in sync with keyboard / NVS WPM changes. No-op in UNIT_TEST
+    /// builds.
+    static void syncWpmFromLocal();
+
 private:
     Winkey() = delete;
 };

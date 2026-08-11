@@ -751,11 +751,16 @@ Covered by `test_poll_skips_when_consumer_busy` and
   text as ASCII bytes over the WK line, and the A1Keyer's
   `cbSetWpm` is *not* called unless RUMlogNG explicitly issues a
   `0x02 N` SetSpeed command (which it does only at initialisation
-  or on user action). To make the A1Keyer display match the
-  logger's outgoing speed, you have to set the speed on the
-  A1Keyer side too (or use RUMlogNG's "Send speed" feature if
-  present). This is not a bug in A1Keyer; it's the same behaviour
-  every WK2 emulator shows with this logger.
+  or on user action).
+- **WPM sync (§ 16.7).** RUMlogNG's `0x02 N` SetSpeed commands reach
+  the A1Keyer via the existing `WK_SPEED` path; local keyboard /
+  NVS WPM changes on the A1Keyer reach RUMlogNG via the K3NG
+  single-byte speed-pot pin event `(wpm - low) | 0x80` (§ 14.1).
+  At open, RUMlogNG can also pull the persisted WPM via `0x00 0x07`
+  (admin 7, Get Values — § 16.7). Hosts that do not parse the
+  speed-pot pin event still receive the current WPM at open time
+  through Get Values, and continue to drive the A1Keyer through
+  `0x02 N` thereafter.
 - RUMlogNG sends the text character-by-character (no word-framing),
   and with the fix above the bridge accumulates the stream into
   one playback chunk, so the audio is smooth and the display
@@ -947,29 +952,60 @@ Beyond the 8-bit status byte (§ 12), the bridge can send **pin-event
 bytes** for things like speed-pot value changes, pushbutton transitions,
 and paddle edges. Hosts (especially CW skimmers) use these.
 
-> **Caveat:** the specific prefix bytes (`0xF0`, `0xF1`, `0xF2`) used
-> below are a *common convention* but are not verified against the
-> WK2 datasheet v23 — that document treats pushbutton and speed-pot
-> events via the status byte mechanism (§ 12), not via prefixed bytes.
-> A1Keyer's bridge uses these prefixes for **K3NG compatibility**
-> (`OPTION_WINKEY_SEND_BREAKIN_STATUS_BYTE` and friends in
-> `keyer_features_and_options.h`); hosts should treat any prefixed
-> byte as a K3NG-specific extension.
+> **Verified against the K3NG reference implementation.** The
+> K1EL WK2 datasheet v23 treats pushbutton and speed-pot events via
+> the status-byte mechanism (§ 12), but the **published K3NG keyer
+> source** (`k3ng_cw_keyer/k3ng_keyer/k3ng_keyer.ino`) uses prefixed
+> bytes/pin-event bytes for both paths and the global
+> hamlib/host-logger ecosystem (RUMlogNG, N1MM, fldigi) decodes that
+> convention. The descriptions below mirror K3NG exactly:
+> speed-pot pin event at `k3ng_keyer.ino:5730`, GET_POT reply at
+> `k3ng_keyer.ino:11788`, pushbutton at `k3ng_keyer.ino:5740+`,
+> paddle-echo at `k3ng_keyer.ino:5780+`. Hosts should treat any
+> prefixed byte as a K3NG-specific extension on top of WK2.
 
 ### 14.1 Speed-pot pin event
 
-When the host has enabled `J 1` (§ 10.3) and the bridge detects a
-speed-pot change, the K3NG convention emits a 2-byte sequence:
-prefix `0xF0` + value 0-255.
-
-```
-bridge ←  0xF0 0xB4        // prefix 0xF0, value 180
-```
-
 A1Keyer has **no physical speed pot** (the Cardputer ADV has no
-potentiometer). The bridge accepts the `V` command and converts linearly
-to WPM between min and max WPM set via the `S` command or admin
-parameters.
+potentiometer), but it synthesises the K3NG speed-pot pin event so
+K3NG-compatible hosts (RUMlogNG, N1MM, fldigi) can mirror local WPM
+changes from the operator's keyboard into their UI. The bridge emits
+a **single byte** whenever MorseModel's WPM changes due to a local
+source:
+
+```
+bridge ←  0x9E              // WPM = 35
+```
+
+Encoding (K3NG reference, `k3ng_keyer.ino:5730`):
+
+```
+byte = (wpm - pot_wpm_low_value) | 0x80
+```
+
+The 0x80 bit is the documented K1EL WK2 "speed pot changed"
+indicator; the low 7 bits carry the offset from the pot's low
+WPM. The host decodes via `wpm = pot_wpm_low_value + (byte & 0x7F)`.
+
+**Pot range.** The end-points are configurable by the host via the
+`0x05 <low> <range> <scale>` (`SET_POT`) admin command (WK2 § 8.1).
+A1Keyer's defaults are `[5, 50]` (matching the audio chain clamp);
+RUMlogNG reconfigures this during its init probe to a different
+range (e.g. `[18, 40]`), and from that point the bridge encodes
+push bytes against that range. Worked values for the default
+range: WPM 5/10/20/27/30/40/50 → 0x80/0x85/0x8F/0x96/0x99/0xA3/0xAD.
+
+The same single-byte encoding is used for:
+
+- **Push** when the operator changes WPM locally (this section).
+- **GET_POT reply** (`0x07`) — the host's shorthand
+  "give me the current pot reading" (`k3ng_keyer.ino:11788`).
+- **Admin-7 reply byte index 1** — the K1EL Get Values payload
+  uses the same byte for the WPM slot (WK2 datasheet v23 Table 14).
+
+See § 16.7 for the full push mechanism (including the
+`_lastPushedWpm` feedback-suppression invariant) and the `0x05`
+Set Pot handler.
 
 ### 14.2 Pushbutton pin event
 
@@ -1007,7 +1043,12 @@ tapping the existing `IambicKeyer::startElement()` callsite
 
 Pin-event bytes are emitted **in addition to** the status byte (§ 12).
 WK2 hosts parse the status byte (which has the 3-MSB tag `110`); K3NG-
-aware hosts may also parse on the high-bit prefix `0xF0..0xFF`.
+aware hosts may also parse on the high-bit prefix `0x80..0xFF`:
+
+- `0x80..0xFF` — speed-pot pin event (this section); the 0x80 bit is
+  the "speed pot changed" marker, the low 7 bits are the offset.
+- `0xF1` — pushbutton pin event (K3NG convention).
+- `0xF2` — paddle-echo pin event (K3NG convention).
 
 ---
 
@@ -1217,9 +1258,20 @@ section.
   - Buffer playback preserves pause/resume position.
   - Echo: every command byte is echoed (in WK2 mode) before the bridge
     processes it.
+  - **WPM sync (§ 16.7):** `setWpmFromLocal` emits the K3NG single-byte
+    pin event `(wpm - low) | 0x80` only when open and only when the
+    value changed; idempotent; silent feedback of the host's own
+    `0x02 N`; byte encoding matches the formula at WPM
+    5/10/20/27/30/40/50 → 0x80/0x85/0x8F/0x96/0x99/0xA3/0xAD; GET_POT
+    (`0x07`) returns the same single byte; `0x05` Set Pot reconfigures
+    the range; admin 7 Get Values replies with 14 bytes carrying WPM
+    at offset 1; soft reset re-arms the push.
 - **Integration test:** the host-side Python utility (§ 17) connects
   over a fake serial port and runs through the full open-then-command-
-  then-status sequence.
+  then-status sequence, including the WPM-sync-specific tests
+  `admin_get_values_14_bytes` (open-time pull) and
+  `set_wpm_30_roundtrips_via_http_state` (host→device direction
+  end-to-end).
 
 ### 16.6 Limitations and non-goals
 
@@ -1231,10 +1283,101 @@ section.
   uses the Paris-standard fixed timings from `src/morse_constants.h`.
   Significant audio-engineering work to wire these through
   `KeyEnvelop` and `MorseEncoder`.
-- No physical speed pot (the Cardputer ADV has no pot); `V` is
-  accepted and converted linearly.
+- No physical speed pot (the Cardputer ADV has no pot); the bridge
+  synthesises the K3NG speed-pot pin event from local WPM changes
+  (§ 14.1, § 16.7).
 - No physical pushbutton; the bridge synthesises pushbutton pin events
   from the operator's KEYING toggle (§ 14.2).
+
+### 16.7 Bidirectional WPM sync
+
+The A1Keyer bridge keeps the host's WPM field in lock-step with the
+operator's choice, exactly like a physical Winkeyer chip with a speed
+pot. The sync is split into two halves that share the bridge's `_wpm`
+mirror and one piece of feedback-suppression state, `_lastPushedWpm`.
+
+```
+                 ┌───────────────────────────────────────────────────┐
+                 │               MorseModel (single source of truth)  │
+                 │   _wpm (atomic int) clamped to [5, 50]            │
+                 │   changeCounter() (atomic uint32_t)               │
+                 └──────────┬────────────────────────┬───────────────┘
+                            │ host→keyer             │ keyer→host
+                            │ 0x02 N                 │ MorseModel
+                            │                        │ changeCounter
+                            ▼                        │ poll
+                ┌────────────────────────┐           ▼
+                │   WinkeyBridge         │   ┌──────────────────────┐
+                │   _wpm  (mirror)       │   │  Winkey::poll()      │
+                │   _lastPushedWpm       │   │  syncWpmFromLocal()  │
+                │   0x07 Get Values      │◄──┤  → _bridge           │
+                │   (wpm-low)|0x80 emit  │   │    .setWpmFromLocal  │
+                └────────────────────────┘   └──────────────────────┘
+```
+
+**Host → keyer (set speed).** `0x02 N` flows through `WK_SPEED` in
+`applyCommand` (`src/winkey_bridge.cpp`). The bridge clamps to WK2's
+[5, 99], stamps `_lastPushedWpm`, fires `cb.setWpm`, and the device
+glue (`src/winkey.cpp:31-34`) calls `MorseModel::instance().setWPM(n)`.
+MorseModel re-clamps to its own [5, 50] and propagates to the audio
+chain.
+
+**Host → keyer (pull current speed).** `0x00 0x07` (admin 7, Get
+Values) is now handled in `handleAdmin` (`src/winkey_bridge.cpp`). The
+reply is a 14-byte payload per K1EL WK2 datasheet v23 Table 14; only
+byte index 1 (the WPM byte) is filled with the real value, the rest are
+zero-filled (K3NG-aware hosts accept this gracefully). RUMlogNG and
+N1MM typically issue this once at open as part of their init probe so
+their UI populates with the persisted A1Keyer speed.
+
+**Keyer → host (push local change).** `Winkey::poll()` runs
+`syncWpmFromLocal()` every loop tick (`src/winkey.cpp`). It compares
+`MorseModel::changeCounter()` against a static last-seen value; when it
+changes, it calls `_bridge.setWpmFromLocal(model.wpm())`. The bridge
+emits the K3NG single-byte speed-pot pin event only when:
+
+1. `_open` is true (a host has issued Host-Open), AND
+2. The polled WPM differs from `_lastPushedWpm` (otherwise the host
+   that just sent `0x02 N` would see its own command echoed back).
+
+`_lastPushedWpm` is set both in the `WK_SPEED` path (so host-issued
+changes suppress their own echo) and inside `setWpmFromLocal` itself
+(so subsequent local changes can be detected). Both paths converge in
+one WPM value, so the invariant `_wpm == _lastPushedWpm` always holds
+after the bridge has converged on a single source of truth.
+
+**Byte encoding.** The push is a single byte:
+
+```
+byte = (wpm - pot_wpm_low_value) | 0x80
+```
+
+The 0x80 bit is the K1EL/TAPR "speed pot changed" indicator; the low
+7 bits carry the offset from the pot's low WPM. Worked values for
+the default range `[5, 50]`: WPM 5/10/20/27/30/40/50 →
+0x80/0x85/0x8F/0x96/0x99/0xA3/0xAD. The host decodes via
+`wpm = pot_wpm_low + (byte & 0x7F)`.
+
+The pot range is set by the host via `0x05 <low> <range> <scale>`
+(`SET_POT`, WK2 § 8.1); A1Keyer defaults to `[5, 50]` and only
+re-encodes against the configured range after that command.
+
+**Edge cases:**
+
+- *Host not yet open* — `setWpmFromLocal` skips the emit but caches the
+  value, so the next admin 7 reply or `0x02 N` echo sees it.
+- *Soft reset (`0x00 0x01`)* — `resetParams()` clears `_lastPushedWpm`
+  to `-1` so the next local change pushes unconditionally.
+- *Host closes (`0x00 0x03`)* — `_open = false`; local changes don't
+  push until the host re-opens.
+- *Rapid keyboard changes (holding `;`)* — each `setWPM` increments
+  `changeCounter`; the bridge's value-equality check means only the
+  first emit per WPM change reaches the wire.
+- *Out-of-range WPM from host (e.g. `0x02 80`)* — `WK_SPEED` clamps to
+  WK2 [5, 99], then `cb.setWpm` → `MorseModel::setWPM` clamps to
+  [5, 50]. The push-back encodes the post-clamp value so the host
+  display converges to 50. Documented as intentional: A1Keyer's audio
+  chain cannot honour WPM > 50, so the host's display should agree.
 
 ---
 
@@ -1341,11 +1484,15 @@ bench:
    Farnsworth the `KeyEnvelop` and `MorseEncoder` need new parameters.
    Significant audio-engineering work; future.
 
-6. **Speed-pot simulation.** The bridge accepts `V` and converts
-   linearly to WPM. But the K1EL chip's speed pot is a *physical*
-   potentiometer; a host that issues `S` overrides it. A1Keyer has no
-   physical pot, so the host's `S` always wins. Documented policy; not
-   a bug.
+6. **Speed-pot simulation.** The bridge accepts `0x05` (`SET_POT`)
+   to configure the pot range and replies to `0x07` (`GET_POT`) with
+   the current WPM encoded as `(wpm - low) | 0x80`. But the K1EL
+   chip's speed pot is a *physical* potentiometer; a host that issues
+   `0x02 N` overrides it. A1Keyer has no physical pot, so the host's
+   `0x02 N` always wins once it arrives. **Resolved by § 16.7** —
+   local WPM changes push the single-byte pin event
+   `(wpm - low) | 0x80` to the host, and the admin 7 Get Values reply
+   covers the open-time read.
 
 7. **Paddle-event mirroring.** The bridge's paddle-echo pin events
    (§ 14.3) would need to tap into the iambic-keyer state machine

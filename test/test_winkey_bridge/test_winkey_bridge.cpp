@@ -393,6 +393,187 @@ static void test_reset_clears_primed() {
     CHECK_EQ(g_spy.sendCnt, 0);
 }
 
+// ─── Bidirectional WPM sync (docs/winkey.md § 16.7) ────────────────────
+//
+// A1Keyer synthesises the K1EL physical speed pot using the
+// `(wpm - pot_wpm_low_value) | 0x80` encoding — the same single-byte
+// idiom K3NG uses for both the live pin-event (k3ng_keyer.ino:5730)
+// and the GET_POT reply (k3ng_keyer.ino:11788). The 0x80 bit is the
+// documented "speed pot changed" indicator; the low 7 bits carry the
+// offset from the pot-low WPM. Hosts (RUMlogNG, N1MM, fldigi) decode
+// via `wpm = low + (byte & 0x7F)`. At open, the bridge also replies to
+// admin 7 (Get Values) with the persisted WPM. These tests pin both
+// halves of the sync.
+
+static void test_setWpmFromLocal_emits_pin_event_when_open() {
+    WinkeyBridge b = makeBridge();
+    open(b);
+    size_t before = g_spy.out.size();
+    b.setWpmFromLocal(25);
+    // One byte: (wpm - low) | 0x80 = (25-5) | 0x80 = 20 | 0x80 = 0x94.
+    CHECK_EQ((int)(g_spy.out.size() - before), 1);
+    CHECK_EQ((int)g_spy.out[before], 0x94);
+    CHECK_EQ(b.wpm(), 25);
+}
+
+static void test_setWpmFromLocal_silent_before_open() {
+    WinkeyBridge b = makeBridge();
+    size_t before = g_spy.out.size();
+    b.setWpmFromLocal(25);
+    // No host-open → no emit (the host isn't listening). The bridge
+    // still caches the value so a later emit / Get Values reply sees it.
+    CHECK_EQ((int)(g_spy.out.size() - before), 0);
+    CHECK_EQ(b.wpm(), 25);
+}
+
+static void test_setWpmFromLocal_no_emit_when_value_unchanged() {
+    WinkeyBridge b = makeBridge();
+    open(b);
+    b.setWpmFromLocal(25);            // first push
+    size_t afterFirst = g_spy.out.size();
+    b.setWpmFromLocal(25);            // same value → no second emit
+    CHECK_EQ((int)(g_spy.out.size() - afterFirst), 0);
+    b.setWpmFromLocal(26);            // change → push
+    CHECK_EQ((int)(g_spy.out.size() - afterFirst), 1);
+}
+
+static void test_setWpmFromLocal_after_host_setSpeed_no_echo_feedback() {
+    // Host sends 0x02 30 → bridge mirrors to MorseModel. The next
+    // setWpmFromLocal(30) (which the polling syncWpmFromLocal would
+    // invoke after observing the changeCounter tick) must NOT emit
+    // because _lastPushedWpm is stamped in the WK_SPEED handler.
+    WinkeyBridge b = makeBridge();
+    open(b);
+    b.feed(0x02); b.feed(30);
+    size_t afterCmd = g_spy.out.size();
+    b.setWpmFromLocal(30);
+    CHECK_EQ((int)(g_spy.out.size() - afterCmd), 0);
+}
+
+static void test_setWpmFromLocal_after_host_setSpeed_with_different_value_pushes() {
+    // Operator overrides host-set speed on the keyer side: the new
+    // value diverges from _lastPushedWpm so the bridge re-emits.
+    WinkeyBridge b = makeBridge();
+    open(b);
+    b.feed(0x02); b.feed(30);                 // host sets 30
+    size_t afterCmd = g_spy.out.size();
+    b.setWpmFromLocal(35);                     // operator overrides to 35
+    CHECK_EQ((int)(g_spy.out.size() - afterCmd), 1);
+    CHECK_EQ((int)g_spy.out[afterCmd], 0x9E);   // (35-5) | 0x80 = 30 | 0x80 = 0x9E
+}
+
+// Pin the WPM→byte encoding for the default pot range [5, 50]. WPM
+// values 5/10/20/27/30/40/50 → bytes 0x80/0x85/0x8F/0x96/0x99/0xA3/0xAD.
+static void test_speed_pot_value_formula_table() {
+    WinkeyBridge b = makeBridge();
+    open(b);
+    int table[][2] = {
+        {5,   0x80},
+        {10,  0x85},
+        {20,  0x8F},
+        {27,  0x96},
+        {30,  0x99},
+        {40,  0xA3},
+        {50,  0xAD},
+    };
+    for (auto& row : table) {
+        size_t before = g_spy.out.size();
+        b.setWpmFromLocal(row[0]);
+        CHECK_EQ((int)(g_spy.out.size() - before), 1);
+        CHECK_EQ((int)g_spy.out[before], row[1]);
+    }
+}
+
+static void test_speed_pot_value_clamps_input() {
+    // WPM outside the wire-facing [5, 99] range saturates rather than
+    // wraps. The byte is `(wpm - low) | 0x80` with low=5, so the
+    // bottom of the range is 0x80 and the top is 0x80 | (99-5) = 0xDE.
+    WinkeyBridge b = makeBridge();
+    open(b);
+    size_t before = g_spy.out.size();
+    b.setWpmFromLocal(0);     // below min → clamp to 5  → offset 0  → 0x80
+    CHECK_EQ((int)g_spy.out[before], 0x80);
+    b.setWpmFromLocal(200);   // above max → clamp to 99 → offset 94 → 0xDE
+    CHECK_EQ((int)g_spy.out[before + 1], 0xDE);
+}
+
+static void test_get_pot_returns_wpm_pot_value() {
+    // 0x07 GET_POT reply uses the same (wpm - low) | 0x80 encoding as
+    // the live pin-event and the admin 7 byte-offset-1 reply. The
+    // old behaviour was a constant 0x80 sentinel — verify that's gone.
+    WinkeyBridge b = makeBridge();
+    open(b);
+    size_t before = g_spy.out.size();
+    b.feed(0x07);                          // GET_POT
+    CHECK_EQ((int)(g_spy.out.size() - before), 1);
+    CHECK_EQ((int)g_spy.out[before], 0x8F);   // default WPM=20 → 0x80|15
+}
+
+static void test_get_pot_reflects_local_change() {
+    // After setWpmFromLocal moves the WPM, GET_POT reflects the new
+    // value. This is what hosts (RUMlogNG hamlib, custom Mac tools)
+    // see when they poll at any time after open.
+    WinkeyBridge b = makeBridge();
+    open(b);
+    b.setWpmFromLocal(35);                 // _wpm = 35
+    size_t before = g_spy.out.size();
+    b.feed(0x07);                          // GET_POT
+    CHECK_EQ((int)g_spy.out[before], 0x9E);   // (35-5) | 0x80 = 0x9E
+}
+
+static void test_admin_get_values_emits_14_bytes() {
+    // K1EL WK2 datasheet v23 Table 14: Get Values (admin 7) replies
+    // with 14 bytes. Only the WPM byte (offset 1) is filled with a
+    // real value; the rest are zero-filled.
+    WinkeyBridge b = makeBridge();
+    open(b);
+    size_t before = g_spy.out.size();
+    b.feed(0x00); b.feed(0x07);    // admin Get Values
+    CHECK_EQ((int)(g_spy.out.size() - before), 14);
+}
+
+static void test_admin_get_values_second_byte_is_wpm() {
+    // After open, default WPM is 20. Get Values reply byte index 1
+    // must carry that value.
+    WinkeyBridge b = makeBridge();
+    open(b);
+    size_t before = g_spy.out.size();
+    b.feed(0x00); b.feed(0x07);
+    CHECK_EQ((int)g_spy.out[before + 1], 20);
+    // Change WPM, re-probe, verify the reply updates.
+    b.feed(0x02); b.feed(35);
+    size_t before2 = g_spy.out.size();
+    b.feed(0x00); b.feed(0x07);
+    CHECK_EQ((int)g_spy.out[before2 + 1], 35);
+}
+
+static void test_set_pot_configures_range() {
+    // `0x05 <low> <range> <scale>` reconfigures the pot range. The
+    // byte encoding is `(wpm - low) | 0x80` — same formula, new
+    // low. The default in resetForTest is [5, 50]; after set pot
+    // [18, 40] (RUMlogNG's init), WPM=23 → (23-18)|0x80 = 0x85.
+    WinkeyBridge b = makeBridge();
+    open(b);
+    b.feed(0x05); b.feed(18); b.feed(22); b.feed(0);  // low=18, range=22
+    size_t before = g_spy.out.size();
+    b.feed(0x07);                                       // GET_POT
+    // WPM is still 20 → (20-18)|0x80 = 0x82
+    CHECK_EQ((int)g_spy.out[before], 0x82);
+}
+
+static void test_reset_clears_last_pushed_wpm() {
+    // After a soft reset, _lastPushedWpm is cleared so the next
+    // setWpmFromLocal() with the post-reset default (20) re-emits.
+    WinkeyBridge b = makeBridge();
+    open(b);
+    b.setWpmFromLocal(40);             // _lastPushedWpm = 40
+    size_t afterFirst = g_spy.out.size();
+    b.feed(0x00); b.feed(0x01);        // soft reset → _wpm=20, _lastPushedWpm=-1
+    b.setWpmFromLocal(20);             // would have been a no-op pre-reset
+    CHECK_EQ((int)(g_spy.out.size() - afterFirst), 1);
+    CHECK_EQ((int)g_spy.out[afterFirst], 0x8F);   // WPM=20 → 0x80|15
+}
+
 int main() {
     RUN(test_host_open_returns_version);
     RUN(test_commands_ignored_before_open);
@@ -418,5 +599,15 @@ int main() {
     RUN(test_text_accepted_after_req_status);
     RUN(test_rumlog_init_does_not_play_text);
     RUN(test_reset_clears_primed);
+    RUN(test_setWpmFromLocal_emits_pin_event_when_open);
+    RUN(test_setWpmFromLocal_silent_before_open);
+    RUN(test_setWpmFromLocal_no_emit_when_value_unchanged);
+    RUN(test_setWpmFromLocal_after_host_setSpeed_no_echo_feedback);
+    RUN(test_setWpmFromLocal_after_host_setSpeed_with_different_value_pushes);
+    RUN(test_speed_pot_value_formula_table);
+    RUN(test_speed_pot_value_clamps_input);
+    RUN(test_admin_get_values_emits_14_bytes);
+    RUN(test_admin_get_values_second_byte_is_wpm);
+    RUN(test_reset_clears_last_pushed_wpm);
     return test_summary();
 }
