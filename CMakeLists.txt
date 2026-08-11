@@ -22,6 +22,7 @@ set(LIB_SOURCES
     src/straight_keyer.cpp
     src/morse_decoder.cpp
     src/display_model.cpp
+    src/display_task.cpp
     src/MorseTable.cpp
     src/key_event_bus.cpp
     src/radio_keyer.cpp

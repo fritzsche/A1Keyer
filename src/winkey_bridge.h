@@ -140,6 +140,18 @@ public:
     /// See docs/winkey.md § 14.1, § 16.7.
     uint8_t speedPotValue() const;
 
+    /// Emit a decoded paddle character (or word-space) toward the host
+    /// so K3NG-compatible loggers (RUMlogNG, N1MM) can mirror the
+    /// operator's manual keying in their CW log. Mirrors K3NG's
+    /// `winkey_port_write(convert_cw_number_to_ascii(...), 0)` at
+    /// `k3ng_keyer.ino:11627`. No-op before host-open or before the
+    /// host has primed the bridge (so the first decoder output during
+    /// a stream-of-text open is not double-echoed). Lowercase is
+    /// upper-cased to match the WK text-byte convention. The character
+    /// is delivered as a single ASCII byte via the standard output
+    /// sink. See docs/winkey.md § 16.8.
+    void emitDecodedChar(char c);
+
 private:
     // Parser state: are we mid-command awaiting parameter byte(s)?
     enum class Parse : uint8_t {

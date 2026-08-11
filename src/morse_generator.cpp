@@ -1,5 +1,6 @@
 #include "morse_generator.h"
 #include "display_model.h"
+#include "display_task.h"
 #include "Log.h"
 #ifndef UNIT_TEST
 #include <Arduino.h>
@@ -13,6 +14,11 @@
 // Winkey-compatible player will emit KeyEventBus::keyDown() / keyUp()
 // here at every dit/dah boundary so on-air transmissions can be
 // triggered by stored text. See docs/keyer.md §"Behavior".
+//
+// The screensaver-wake-up signal (`DisplayTask::wakeFromScreensaver()`)
+// IS bumped on every key-down element below so the screen unblanks
+// during stored-text or WinKey-emulation playback — the same way the
+// paddle ISR bumps it for manual keying. See docs/winkey.md § 16.9.
 
 // ---------------------------------------------------------------------------
 // Constructor
@@ -169,6 +175,19 @@ void MorseGenerator::advanceToNextElement() {
     const MorseEncoder::Element& el = _elements[_elIdx];
     _elKeyDown = el.keyDown;
     _elSamplePos = 0;
+
+    // Screensaver wake-up: mirror the paddle-ISR behaviour
+    // (`MorseKey::isrDit` / `isrDah` rising-edge wakeup at
+    // src/morse_key.cpp:33, 48). Any CW element that goes key-down
+    // counts as activity — the screen unblanks during stored-text
+    // playback (Cardputer P-key) and during WinKey text playback
+    // (RUMlogNG / N1MM typing into the outgoing-CW field). Cheap
+    // enough to call on every mark boundary: it's a single
+    // volatile-bool write, ISR-safe, and the display task drains
+    // it once per 50 ms tick. See docs/winkey.md § 16.9.
+    if (_elKeyDown) {
+        DisplayTask::wakeFromScreensaver();
+    }
 
     if (_elKeyDown) {
         auto elType = (el.type == MorseEncoder::Element::DIT) ? KeyEnvelop::Element::DIT

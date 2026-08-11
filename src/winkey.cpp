@@ -16,6 +16,7 @@
 #include "display_model.h"
 #include "audio_engine.h"
 #include "morse_generator.h"
+#include "morse_decoder.h"
 #include "Log.h"
 
 namespace {
@@ -73,6 +74,14 @@ void cbStopSending(void* /*ctx*/) {
     if (gen) gen->stop();
 }
 
+// Forward each decoded paddle character (or word-space) to the WK
+// bridge so RUMlogNG / N1MM log the operator's manual keying. Hooked in
+// Winkey::begin(). Mirrors K3NG's `winkey_paddle_echo_buffer` decode
+// path at k3ng_keyer.ino:11623.
+void cbDecodedChar(char c, void* /*ctx*/) {
+    _bridge.emitDecodedChar(c);
+}
+
 // Returns true if the audio player can accept a fresh sendText()
 // chunk. poll() consults this so back-to-back text bytes accumulate
 // in the bridge buffer and play as one phrase instead of restarting
@@ -95,6 +104,10 @@ void Winkey::begin() {
     cb.stopSending     = &cbStopSending;
     cb.ctx             = nullptr;
     _bridge.begin(&wkOut, nullptr, cb);
+    // Forward MorseDecoder's decoded characters back to the host so
+    // RUMlogNG / N1MM log the operator's paddle keying. Mirrors K3NG's
+    // `winkey_paddle_echo_buffer` decode path at k3ng_keyer.ino:11623.
+    MorseDecoder::setDecodedCharHook(&cbDecodedChar, nullptr);
     Log::info("[WK] WinkeyBridge ready (WinKey is the default; press 'D' for Console/debug mode)");
 }
 

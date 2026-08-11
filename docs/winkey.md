@@ -1266,6 +1266,16 @@ section.
     (`0x07`) returns the same single byte; `0x05` Set Pot reconfigures
     the range; admin 7 Get Values replies with 14 bytes carrying WPM
     at offset 1; soft reset re-arms the push.
+  - **Decoded-paddle echo (§ 16.8):** `MorseDecoder::setDecodedCharHook`
+    fires once per decoded char; `WinkeyBridge::emitDecodedChar` emits
+    uppercase ASCII to the host; silent before open and before primed;
+    prosigns (`<ar>`, `<sk>`, `<ka>`) emit as the literal `<AR>`, etc.;
+    word-space emits a single space byte.
+  - **Screensaver wake-up (§ 16.9):** `MorseGenerator::advanceToNextElement`
+    bumps `DisplayTask::wakeFromScreensaver()` on every key-down
+    element; silence elements do not bump. The flag is drained by
+    `DisplayTask::consumeWakeRequest()` from the display task loop
+    and from the unit tests.
 - **Integration test:** the host-side Python utility (§ 17) connects
   over a fake serial port and runs through the full open-then-command-
   then-status sequence, including the WPM-sync-specific tests
@@ -1378,6 +1388,116 @@ re-encodes against the configured range after that command.
   [5, 50]. The push-back encodes the post-clamp value so the host
   display converges to 50. Documented as intentional: A1Keyer's audio
   chain cannot honour WPM > 50, so the host's display should agree.
+
+### 16.8 Decoded-paddle echo
+
+When the operator keys the paddle manually, the on-board
+`MorseDecoder` (`src/morse_decoder.cpp`) consumes the dit/dah symbols
+from the active keyer's ring buffer and decodes them to text. A1Keyer
+forwards each decoded character back to the host as a single text
+byte so K3NG-compatible loggers (RUMlogNG, N1MM) mirror the keyed
+text in their CW log — same behaviour as OpenCW and other K3NG-based
+keyers. Mirrors K3NG's `winkey_paddle_echo_buffer` decode path at
+`k3ng_keyer.ino:11623-11631`.
+
+```
+paddle ─┐                                       ┌── host (RUMlogNG)
+        │                                       │
+        ▼                                       ▼
+IambicKeyer ─dit/dah symbols─► MorseDecoder ─char─► WinkeyBridge
+                                                       │
+                                                       │ ascii byte
+                                                       ▼
+                                                  serial line
+```
+
+**Wire shape.** Each decoded character is a single ASCII byte on
+the WK line. The bridge (`WinkeyBridge::emitDecodedChar`) emits the
+byte through the same `_out` callback as everything else. Lowercase
+letters (the morse-decoder convention, e.g. `c` for `-.-.`) are
+uppercased on the way out to match the WK text-byte convention.
+Prosigns are emitted as the literal `<AR>`, `<SK>`, `<KA>`,
+`<KN>`, `<error>` characters — the host logger renders the
+angle-bracketed sequence as a single prosign in the log. Word
+spaces are emitted as a single space byte.
+
+**Wiring.** The wiring is in `Winkey::begin()` (`src/winkey.cpp`):
+
+1. `MorseDecoder::setDecodedCharHook(cbDecodedChar, nullptr)` —
+   installs a hook fired by `MorseDecoder::flush()` and the
+   SPACE branch of `accumulate()`.
+2. `cbDecodedChar(c, ctx)` — calls `_bridge.emitDecodedChar(c)`.
+3. The bridge suppresses the emit before host-open or before the
+   bridge is primed (no host-side target / no clean init window),
+   same gating as the WPM pin-event push.
+
+**Source split.** The decoder side lives in
+`MorseDecoder::setDecodedCharHook` (`src/morse_decoder.h:55-65`,
+`src/morse_decoder.cpp:42-49`); the bridge side lives in
+`WinkeyBridge::emitDecodedChar` (`src/winkey_bridge.h:140-150`,
+`src/winkey_bridge.cpp:183-209`). The hook is optional — the
+decoder retains its existing `Log::write` + `MorseModel::appendDecodedChar`
+behaviour when no hook is installed, so removing the wiring is
+non-breaking.
+
+**Edge cases:**
+
+- *Host not yet open* — `emitDecodedChar` returns silently (no
+  echo before the host is connected).
+- *Host not yet primed* — `emitDecodedChar` returns silently so
+  the first decoded char during a RUMlogNG-init stream does not
+  leak as an out-of-order reply.
+- *Host closes (`0x00 0x03`)* — subsequent decode events are
+  dropped until the host re-opens.
+- *Prosigns* — the morse-decoder returns the literal `<ar>`,
+  `<sk>`, etc. (lowercase, 4 chars). The bridge uppercases only
+  the letters; the angle brackets pass through. The host
+  receives `<AR>` etc.
+- *Word space* — `MorseDecoder::accumulate(SPACE_CHAR, ...)`
+  fires the hook with `' '`, the bridge emits a single space byte.
+  The morse decoder does not gate on WPM — a fast paddle at 50 WPM
+  is decoded the same way as a slow paddle at 10 WPM.
+
+### 16.9 Screensaver wake-up on stored-text / WinKey playback
+
+The display blanks after 5 minutes of inactivity. Any paddle press
+wakes the screen — the paddle ISR sets `s_wakeRequested` at
+`src/morse_key.cpp:33, 48` and the display task drains the flag
+on its next tick (`src/display_task.cpp:60-67`). The same
+behaviour applies to **stored-text playback** (the Cardputer
+P-key → `MorseGenerator::playText()`) and **WinKey text playback**
+(host types into RUMlogNG's outgoing-CW field → bridge → generator).
+
+The wake-up is bumped at every **key-down element boundary** in
+`MorseGenerator::advanceToNextElement` (after the
+`_elKeyDown = el.keyDown` assignment, at `src/morse_generator.cpp`).
+Silence elements (inter-element, inter-character, inter-word) do
+**not** bump the flag — only the actual mark transitions count
+as activity, matching K3NG's `last_active_time` model at
+`k3ng_keyer.ino:3097` (paddle path) and `:10242-10246` (send-buffer
+path). The wake call is a single volatile-bool write, ISR-safe and
+cheap enough to invoke on every mark boundary (a 20 WPM `C` is
+~120 ms; an "S" is 60 ms).
+
+**Wiring:** the bump is in
+`src/morse_generator.cpp::advanceToNextElement`. Both the
+`P`-key stored-text path (`AudioEngine::morseGen()->playText()`) and
+the WinKey text path (`Winkey::poll()` →
+`WinkeyBridge::poll()` → `cbSendText` →
+`MorseModel::setMode(ENCODER)` + `gen->playText()`) go through
+`MorseGenerator::playText`, so the fix covers both callers
+without per-callsite changes.
+
+**Not yet covered:** the agent that compared A1Keyer to K3NG also
+flagged that `MorseGenerator` is **deliberately not wired to
+`KeyEventBus`** (`src/morse_generator.cpp:11-15` comment) — so
+WinKey text playback today keys sidetone audio but **does not key
+the on-air radio line**. That's a separate, larger bug (the
+generator needs to emit `KeyEventBus::keyDown()` / `keyUp()` at
+every element boundary, mirroring `IambicKeyer::startElement`).
+The screensaver fix above is unaffected by that gap and is the
+right shape of fix; the radio-keying fix is filed as a separate
+gap to be picked up later.
 
 ---
 

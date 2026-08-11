@@ -574,6 +574,107 @@ static void test_reset_clears_last_pushed_wpm() {
     CHECK_EQ((int)g_spy.out[afterFirst], 0x8F);   // WPM=20 → 0x80|15
 }
 
+// ─── Decoded-paddle echo to host (docs/winkey.md § 16.8) ─────────────
+//
+// When the operator keys the paddle manually, the on-board MorseDecoder
+// decodes the dit/dah stream and forwards each character to the WK
+// bridge via emitDecodedChar(); the bridge emits one byte per character
+// to the host so K3NG-compatible loggers (RUMlogNG, N1MM) mirror the
+// keyed text in their log. Mirrors K3NG's `winkey_paddle_echo_buffer`
+// decode path at k3ng_keyer.ino:11623-11631.
+
+static void test_emitDecodedChar_silent_before_open() {
+    // No host connected → no echo. Mirrors K3NG's
+    // `if (winkey_host_open)` guard at k3ng_keyer.ino:11623.
+    WinkeyBridge b = makeBridge();
+    size_t before = g_spy.out.size();
+    b.emitDecodedChar('C');
+    CHECK_EQ((int)(g_spy.out.size() - before), 0);
+}
+
+static void test_emitDecodedChar_silent_before_primed() {
+    // Open but not yet primed → the bridge is still in the host-init
+    // window where any byte we send risks being interpreted as an
+    // out-of-order reply. Sit on the byte silently — same logic
+    // that suppresses text bytes arriving before the first probe.
+    WinkeyBridge b = makeBridge();
+    openUnprimed(b);
+    size_t before = g_spy.out.size();
+    b.emitDecodedChar('C');
+    CHECK_EQ((int)(g_spy.out.size() - before), 0);
+}
+
+static void test_emitDecodedChar_uppercases_lowercase() {
+    // Operators may paddle in lowercase habit; the host receives
+    // uppercase to match the WK text-byte convention.
+    WinkeyBridge b = makeBridge();
+    open(b);
+    size_t before = g_spy.out.size();
+    b.emitDecodedChar('c');
+    CHECK_EQ((int)(g_spy.out.size() - before), 1);
+    CHECK_EQ((int)g_spy.out[before], (int)'C');
+}
+
+static void test_emitDecodedChar_passes_through_uppercase() {
+    WinkeyBridge b = makeBridge();
+    open(b);
+    size_t before = g_spy.out.size();
+    b.emitDecodedChar('Q');
+    CHECK_EQ((int)(g_spy.out.size() - before), 1);
+    CHECK_EQ((int)g_spy.out[before], (int)'Q');
+}
+
+static void test_emitDecodedChar_emits_space_for_word_gap() {
+    // Word-space is its own byte — K3NG sends a separate ' ' byte
+    // at k3ng_keyer.ino:11637 after a word-space timeout.
+    WinkeyBridge b = makeBridge();
+    open(b);
+    size_t before = g_spy.out.size();
+    b.emitDecodedChar(' ');
+    CHECK_EQ((int)(g_spy.out.size() - before), 1);
+    CHECK_EQ((int)g_spy.out[before], (int)' ');
+}
+
+static void test_emitDecodedChar_emits_prosign_chars_unchanged() {
+    // Prosigns like AR (.-.-.) decode to "<ar>" — the bridge passes
+    // `<` and `>` through verbatim and uppercases only the letters.
+    // The host sees "<AR>", which RUMlogNG renders as a single
+    // prosign in the log.
+    WinkeyBridge b = makeBridge();
+    open(b);
+    size_t before = g_spy.out.size();
+    b.emitDecodedChar('<');
+    b.emitDecodedChar('a');
+    b.emitDecodedChar('r');
+    b.emitDecodedChar('>');
+    CHECK_EQ((int)(g_spy.out.size() - before), 4);
+    CHECK_EQ((int)g_spy.out[before],     (int)'<');
+    CHECK_EQ((int)g_spy.out[before + 1], (int)'A');
+    CHECK_EQ((int)g_spy.out[before + 2], (int)'R');
+    CHECK_EQ((int)g_spy.out[before + 3], (int)'>');
+}
+
+static void test_emitDecodedChar_emits_decoded_text_after_primed() {
+    // End-to-end shape: after open, the bridge emits nothing until
+    // a character is decoded. Then a stream of decoded chars + a
+    // space + a stream of decoded chars arrives as the same byte
+    // sequence on the wire. This is what the host sees.
+    WinkeyBridge b = makeBridge();
+    open(b);
+    size_t before = g_spy.out.size();
+    b.emitDecodedChar('C');
+    b.emitDecodedChar('Q');
+    b.emitDecodedChar(' ');
+    b.emitDecodedChar('D');
+    b.emitDecodedChar('E');
+    CHECK_EQ((int)(g_spy.out.size() - before), 5);
+    CHECK_EQ((int)g_spy.out[before],     (int)'C');
+    CHECK_EQ((int)g_spy.out[before + 1], (int)'Q');
+    CHECK_EQ((int)g_spy.out[before + 2], (int)' ');
+    CHECK_EQ((int)g_spy.out[before + 3], (int)'D');
+    CHECK_EQ((int)g_spy.out[before + 4], (int)'E');
+}
+
 int main() {
     RUN(test_host_open_returns_version);
     RUN(test_commands_ignored_before_open);
@@ -609,5 +710,12 @@ int main() {
     RUN(test_admin_get_values_emits_14_bytes);
     RUN(test_admin_get_values_second_byte_is_wpm);
     RUN(test_reset_clears_last_pushed_wpm);
+    RUN(test_emitDecodedChar_silent_before_open);
+    RUN(test_emitDecodedChar_silent_before_primed);
+    RUN(test_emitDecodedChar_uppercases_lowercase);
+    RUN(test_emitDecodedChar_passes_through_uppercase);
+    RUN(test_emitDecodedChar_emits_space_for_word_gap);
+    RUN(test_emitDecodedChar_emits_prosign_chars_unchanged);
+    RUN(test_emitDecodedChar_emits_decoded_text_after_primed);
     return test_summary();
 }

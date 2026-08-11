@@ -1,6 +1,7 @@
 #include "test_framework.h"
 #include "morse_generator.h"
 #include "key_envelop.h"
+#include "display_task.h"
 #include <vector>
 
 // --- state transitions ---
@@ -447,6 +448,39 @@ static void test_rumlog_599_TU() {
 }
 
 
+// ─── Screensaver wake-up (docs/winkey.md § 16.9) ─────────────────────
+//
+// MorseGenerator must bump the screensaver wake-up flag on every
+// key-down element boundary so the screen unblanks during stored-text
+// playback (Cardputer P-key) and WinKey text playback (RUMlogNG
+// typing). Mirrors the paddle-ISR wake path in src/morse_key.cpp:33,48.
+
+static void test_playText_wakes_screensaver_on_each_keydown_element() {
+    KeyEnvelop env(20, 0.005f, 48000);
+    MorseGenerator gen(&env, 20);
+    // Drain any pending wake from earlier tests.
+    while (DisplayTask::consumeWakeRequest()) {}
+    gen.playText("E");  // E = single dit
+    // Advance enough samples for the dit's key-down element to fire.
+    int ditLen = env.envelopeSize(KeyEnvelop::Element::DIT);
+    std::vector<int16_t> buf(ditLen * 2, 0);
+    gen.fillSamplesMono(buf.data(), buf.size(), 500.0f, 16384);
+    // The dit's key-down element must have bumped the wake flag.
+    CHECK(DisplayTask::consumeWakeRequest());
+}
+
+static void test_silence_only_text_does_not_wake() {
+    // No text played → no element boundaries → no wake requests.
+    KeyEnvelop env(20, 0.005f, 48000);
+    MorseGenerator gen(&env, 20);
+    while (DisplayTask::consumeWakeRequest()) {}
+    int ditLen = env.envelopeSize(KeyEnvelop::Element::DIT);
+    std::vector<int16_t> buf(ditLen * 4, 0);
+    gen.fillSamplesMono(buf.data(), buf.size(), 500.0f, 16384);
+    CHECK(!DisplayTask::consumeWakeRequest());
+}
+
+
 int main() {
     printf("=== test_morse_generator ===\n");
     RUN(test_generator_idle_by_default);
@@ -471,5 +505,7 @@ int main() {
     RUN(test_rumlog_ur_5NN_TU);
     RUN(test_rumlog_ur_5NN_T_then_U);
     RUN(test_rumlog_599_TU);
+    RUN(test_playText_wakes_screensaver_on_each_keydown_element);
+    RUN(test_silence_only_text_does_not_wake);
     return test_summary();
 }

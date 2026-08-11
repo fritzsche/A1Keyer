@@ -115,6 +115,92 @@ static void test_decoder_read_after_manual_write() {
     CHECK(c == '*');
 }
 
+// ─── Decoded-char hook (docs/winkey.md § 16.8) ────────────────────────
+//
+// MorseDecoder fires a DecodedCharFn once per character produced by
+// flush() (including the SPACE_CHAR for word gaps). The hook is the
+// integration point for piping decoded paddle text into the WK
+// bridge so RUMlogNG / N1MM log the operator's manual keying.
+
+struct HookCapture {
+    std::vector<char> chars;
+    void*             ctxSeen = nullptr;
+};
+
+static void hookCapture(char c, void* ctx) {
+    auto* h = static_cast<HookCapture*>(ctx);
+    h->chars.push_back(c);
+}
+
+static void test_hook_fires_per_decoded_char() {
+    HookCapture cap;
+    MorseDecoder::setDecodedCharHook(&hookCapture, &cap);
+    char buf[16];
+    size_t pos = 0;
+    // C = -.-. → MorseEncoder::charFromMorse returns "c" (lowercase)
+    // The decoder passes the raw decoded string to the hook verbatim;
+    // the bridge's emitDecodedChar() does the uppercasing.
+    MorseDecoder::accumulate('-', buf, sizeof(buf), &pos);
+    MorseDecoder::accumulate('.', buf, sizeof(buf), &pos);
+    MorseDecoder::accumulate('-', buf, sizeof(buf), &pos);
+    MorseDecoder::accumulate('.', buf, sizeof(buf), &pos);
+    MorseDecoder::accumulate(MorseDecoder::END_OF_CHAR, buf, sizeof(buf), &pos);
+    CHECK_EQ((int)cap.chars.size(), 1);
+    CHECK_EQ((int)cap.chars[0],     (int)'c');
+    MorseDecoder::setDecodedCharHook(nullptr, nullptr);
+}
+
+static void test_hook_fires_per_prosign_char() {
+    // AR = ".-.-." decodes to "<ar>" (4 chars: <, a, r, >). The hook
+    // fires once per display character so the host receives the same
+    // sequence it would for a typed prosign.
+    HookCapture cap;
+    MorseDecoder::setDecodedCharHook(&hookCapture, &cap);
+    char buf[16];
+    size_t pos = 0;
+    MorseDecoder::accumulate('.',  buf, sizeof(buf), &pos);
+    MorseDecoder::accumulate('-',  buf, sizeof(buf), &pos);
+    MorseDecoder::accumulate('.',  buf, sizeof(buf), &pos);
+    MorseDecoder::accumulate('-',  buf, sizeof(buf), &pos);
+    MorseDecoder::accumulate('.',  buf, sizeof(buf), &pos);
+    MorseDecoder::accumulate(MorseDecoder::END_OF_CHAR, buf, sizeof(buf), &pos);
+    CHECK_EQ((int)cap.chars.size(), 4);
+    CHECK_EQ((int)cap.chars[0], (int)'<');
+    CHECK_EQ((int)cap.chars[1], (int)'a');
+    CHECK_EQ((int)cap.chars[2], (int)'r');
+    CHECK_EQ((int)cap.chars[3], (int)'>');
+    // Note: the prosign string "<ar>" itself is the raw morse-decoder
+    // output. The bridge (WinkeyBridge::emitDecodedChar) handles any
+    // passthrough formatting — prosigns in particular are emitted as
+    // the literal "<ar>" characters; the host logger interprets them
+    // as a single prosign.
+    MorseDecoder::setDecodedCharHook(nullptr, nullptr);
+}
+
+static void test_hook_fires_for_space_char() {
+    HookCapture cap;
+    MorseDecoder::setDecodedCharHook(&hookCapture, &cap);
+    char buf[16];
+    size_t pos = 0;
+    MorseDecoder::accumulate(MorseDecoder::SPACE_CHAR, buf, sizeof(buf), &pos);
+    CHECK_EQ((int)cap.chars.size(), 1);
+    CHECK_EQ((int)cap.chars[0], (int)' ');
+    MorseDecoder::setDecodedCharHook(nullptr, nullptr);
+}
+
+static void test_hook_silent_when_uninstalled() {
+    // The default state — no hook installed. accumulate/flush must
+    // not crash; the original Log::write + appendDecodedChar paths
+    // remain the only side effects.
+    MorseDecoder::setDecodedCharHook(nullptr, nullptr);
+    char buf[16];
+    size_t pos = 0;
+    MorseDecoder::accumulate('.', buf, sizeof(buf), &pos);
+    MorseDecoder::accumulate('-', buf, sizeof(buf), &pos);
+    MorseDecoder::accumulate(MorseDecoder::END_OF_CHAR, buf, sizeof(buf), &pos);
+    CHECK(true);  // survived without crashing
+}
+
 int main() {
     printf("=== test_morse_decoder ===\n");
     RUN(test_decode_ka_prosign);
@@ -128,6 +214,10 @@ int main() {
     RUN(test_prosign_ar_expands_to_multiple_chars);
     RUN(test_decoder_read_empty_returns_false);
     RUN(test_decoder_available_starts_at_zero);
+    RUN(test_hook_fires_per_decoded_char);
+    RUN(test_hook_fires_per_prosign_char);
+    RUN(test_hook_fires_for_space_char);
+    RUN(test_hook_silent_when_uninstalled);
     RUN(test_decoder_read_after_manual_write);
     return test_summary();
 }

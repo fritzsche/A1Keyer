@@ -27,6 +27,17 @@
 // ---------------------------------------------------------------------------
 IambicKeyer*    MorseDecoder::s_keyer        = nullptr;
 StraightKeyer*  MorseDecoder::s_straightKeyer = nullptr;
+MorseDecoder::DecodedCharFn MorseDecoder::s_decodedCharHook = nullptr;
+void*                     MorseDecoder::s_decodedCharCtx  = nullptr;
+
+// ---------------------------------------------------------------------------
+// MorseDecoder::fireDecodedChar — invoke the optional hook (if installed)
+// ---------------------------------------------------------------------------
+void MorseDecoder::fireDecodedChar(char c) {
+    if (s_decodedCharHook) {
+        s_decodedCharHook(c, s_decodedCharCtx);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // MorseDecoder::begin
@@ -34,6 +45,14 @@ StraightKeyer*  MorseDecoder::s_straightKeyer = nullptr;
 void MorseDecoder::begin(IambicKeyer* keyer, StraightKeyer* straightKeyer) {
     s_keyer        = keyer;
     s_straightKeyer = straightKeyer;
+}
+
+// ---------------------------------------------------------------------------
+// MorseDecoder::setDecodedCharHook
+// ---------------------------------------------------------------------------
+void MorseDecoder::setDecodedCharHook(DecodedCharFn fn, void* ctx) {
+    s_decodedCharHook = fn;
+    s_decodedCharCtx  = ctx;
 }
 
 // ---------------------------------------------------------------------------
@@ -81,6 +100,7 @@ void MorseDecoder::accumulate(char symbol, char* buffer,
         flush(buffer, inoutPos);
         Log::write(" ");
         MorseModel::instance().appendDecodedChar(' ');
+        fireDecodedChar(' ');
         return;
     }
 
@@ -113,6 +133,7 @@ void MorseDecoder::flush(char* buffer, size_t* inoutPos) {
         // expand to multiple display characters).
         for (const char* p = decoded; *p; ++p) {
             MorseModel::instance().appendDecodedChar(*p);
+            fireDecodedChar(*p);
         }
     }
 

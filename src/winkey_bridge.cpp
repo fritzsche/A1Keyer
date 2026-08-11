@@ -180,6 +180,34 @@ void WinkeyBridge::emit(uint8_t byte) {
     if (_out) _out(byte, _outCtx);
 }
 
+void WinkeyBridge::emitDecodedChar(char c) {
+    // No host connected → no echo. Mirrors K3NG's
+    //   if (winkey_host_open) { ... winkey_port_write(...); }
+    // at k3ng_keyer.ino:11623.
+    if (!_open) return;
+
+    // Not yet primed → the bridge is still in the RUMlogNG-init
+    // window where any byte we send risks being interpreted as an
+    // out-of-order reply to the host's first probe (see the
+    // RUMlogNG-init-does-not-play-text test). Sit on the byte
+    // silently until the host has asked us a question that we
+    // answered (GET_POT / REQ_STATUS).
+    if (!_primed) return;
+
+    if (c == ' ') {
+        // Word-space: emit a single space byte. Mirrors K3NG's
+        // winkey_port_write(' ', 0) at k3ng_keyer.ino:11637.
+        emit((uint8_t)' ');
+        return;
+    }
+
+    // Lowercase → uppercase to match the WK text-byte convention
+    // (the host receives ASCII characters; uppercase keeps the
+    // log readable regardless of the operator's paddle habit).
+    if (c >= 'a' && c <= 'z') c = (char)(c - ('a' - 'A'));
+    emit((uint8_t)c);
+}
+
 void WinkeyBridge::feed(uint8_t byte) {
     switch (_parse) {
         case Parse::ADMIN:

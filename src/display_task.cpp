@@ -1,12 +1,16 @@
 #include "display_task.h"
 #include "display_model.h"
 #include "Log.h"
+#ifndef UNIT_TEST
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#endif
 
 static DisplayInterface* s_display = nullptr;
+#ifndef UNIT_TEST
 static TaskHandle_t s_handle = nullptr;
+#endif
 
 // ISR-safe flag: morse key ISR sets this to wake the display from screen-saver.
 // The display task polls this every tick and resets it after handling.
@@ -16,6 +20,15 @@ void DisplayTask::wakeFromScreensaver() {
     s_wakeRequested = true;
 }
 
+bool DisplayTask::consumeWakeRequest() {
+    if (s_wakeRequested) {
+        s_wakeRequested = false;
+        return true;
+    }
+    return false;
+}
+
+#ifndef UNIT_TEST
 void DisplayTask::begin(DisplayInterface* display) {
     s_display = display;
     display->init();
@@ -119,3 +132,4 @@ void DisplayTask::requestRender() {
     MorseModel::instance().touch();
     MorseModel::instance().incrementChangeCounter();
 }
+#endif  // !UNIT_TEST
