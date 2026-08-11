@@ -113,10 +113,35 @@ void MorseGenerator::playText(const char* text) {
 
     _elIdx = 0;
     _elSamplePos = 0;
-    _state = State::PLAYING;
     _currentChar = _playText.empty() ? '\0' : _playText[0];
     _phase = 0.0f;  // reset sine phase so next tone starts at zero
     _phaseInc = 0.0f;
+    // CRITICAL ORDERING: set up the first element BEFORE flipping
+    // `_state = PLAYING`. Otherwise the audio task (Core 1, priority 22)
+    // can preempt playText() between `_state = PLAYING` and
+    // `advanceToNextElement()` below, see `state == PLAYING` with
+    // `_elKeyDown=0, _elTotalSamples=0`, call its own advance, and
+    // start playing the first mark. When playText() resumes and calls
+    // its own advance, it advances PAST the first mark into the
+    // inter-character silence, and the audio task's already-running
+    // fillSamplesMono now produces silence + U — i.e. T is inaudible.
+    // Captured by `[MG-DIAG-FS]` on hardware repro (2026-08). Fix: do
+    // the advance FIRST, then publish PLAYING. Audio task that preempts
+    // mid-advance will still see `state != PLAYING` (we haven't
+    // published yet) and bail out via the IDLE/END branch.
+    MorseModel::instance().resetPlayerHead();  // fresh session, reset player color tracking
+    // Advance FIRST, before publishing PLAYING. This sets up _elKeyDown,
+    // _elTotalSamples, _currentEnv, etc. atomically (from the audio task's
+    // perspective) so a preemption between advance and publish still leaves
+    // _state != PLAYING — the audio task sees IDLE and skips.
+    advanceToNextElement();
+    // After advance: if the encoder produced at least one element,
+    // _elIdx was incremented past it. For empty input (playText(""))
+    // advance hits the exhausted branch, sets _state = IDLE, and
+    // _elIdx stays 0 — do NOT publish PLAYING in that case.
+    if (!_elements.empty()) {
+        _state = State::PLAYING;  // publish AFTER first element is set up
+    }
     // DIAGNOSTIC: first-play trace. Captures the entire state vector
     // that determines what audio the very first playText after boot
     // will produce. Useful when the "first TU sounds like X" bug
@@ -148,9 +173,8 @@ void MorseGenerator::playText(const char* text) {
         Log::write("[MG] playText: text=\"%s\" elements=%zu\n",
                       _playText.c_str(), (unsigned)_elements.size());
     }
-    MorseModel::instance().resetPlayerHead();  // fresh session, reset player color tracking
-    // Do NOT clear the buffer — append to existing keyer text
-    advanceToNextElement();
+    // (resetPlayerHead + advanceToNextElement moved above, BEFORE
+    // `_state = PLAYING`, to close the audio-task race.)
     if (callNo <= 5) {
         Log::write("[MG-DIAG] playText#%d after advance: elIdx=%zu elKeyDown=%d "
                    "elSamplePos=%d elTotalSamples=%d currentChar='%c'(%d)\n",

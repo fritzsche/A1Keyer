@@ -243,7 +243,7 @@ static void test_split_chunks_preserve_inter_char_space() {
     gen.playText("U");
     CHECK(gen.isPlaying());
 
-    int nz = countNonZeroInWindow(gen, 3 * ditSamples);
+    int nz = countNonZeroInWindow(gen, 2 * ditSamples);
     CHECK(nz == 0);
 }
 
@@ -325,12 +325,12 @@ static void test_rumlog_ur_599_TU() {
     // User-reported scenario: "UR 599 " then "TU".
     // Chunk 1 ends with WORD_SPACE → no prepend → encoder emits
     // [DAH, CHAR_SPACE, DIT, DIT, DAH] for chunk 2.
-    //   timeline (DAH envelope = 4u, CHAR_SPACE = 3u, DIT = 2u):
-    //     T_DAH(4u: 3 tone + 1 trailing) | CHAR_SPACE(3u silence) | U_DIT(2u)
-    //   The CHAR_SPACE provides 3u of silence AFTER T's DAH envelope;
-    //   T's envelope trailing silence (1u, internal) plus CHAR_SPACE (3u)
-    //   give the spec's 4u gap between T's tone end and U's tone start.
-    // Verify: 3 units after T's DAH envelope are silent (the CHAR_SPACE),
+    //   timeline (DAH envelope = 4u, CHAR_SPACE = 2u, DIT = 2u):
+    //     T_DAH(4u: 3 tone + 1 trailing) | CHAR_SPACE(2u silence) | U_DIT(2u)
+    //   The CHAR_SPACE provides 2u of silence AFTER T's DAH envelope;
+    //   T's envelope trailing silence (1u, internal) plus CHAR_SPACE (2u)
+    //   give the spec's 3u gap between T's tone end and U's tone start.
+    // Verify: 2 units after T's DAH envelope are silent (the CHAR_SPACE),
     // then U's first DIT begins.
     KeyEnvelop env(20, 0.005f, 48000);
     MorseGenerator gen(&env, 20);
@@ -350,8 +350,9 @@ static void test_rumlog_ur_599_TU() {
     for (auto s : tMark) if (s != 0) ++nz;
     CHECK(nz > 0);  // T's DAH tone is audible
 
-    // Next 3 units = CHAR_SPACE silence (the inter-character gap)
-    std::vector<int16_t> tToU(3 * ditSamples, 0);
+    // Next 2 units = CHAR_SPACE silence (the inter-character gap;
+    // plus the 1u envelope trailing from T = 3 spec units total).
+    std::vector<int16_t> tToU(2 * ditSamples, 0);
     gen.fillSamplesMono(tToU.data(), tToU.size(), 500.0f, 16384);
     nz = 0;
     for (auto s : tToU) if (s != 0) ++nz;
@@ -384,7 +385,7 @@ static void test_rumlog_ur_5NN_TU() {
     for (auto s : tMark) if (s != 0) ++nz;
     CHECK(nz > 0);
 
-    std::vector<int16_t> tToU(3 * ditSamples, 0);
+    std::vector<int16_t> tToU(2 * ditSamples, 0);
     gen.fillSamplesMono(tToU.data(), tToU.size(), 500.0f, 16384);
     nz = 0;
     for (auto s : tToU) if (s != 0) ++nz;
@@ -397,8 +398,9 @@ static void test_rumlog_ur_5NN_T_then_U() {
     // Encoder emits [DAH] for "T" — no trailing CHAR_SPACE because T
     // is the last char in the chunk. After T's DAH drains, _ended-
     // WithBoundarySilence = false, so playText("U") MUST prepend a
-    // CHAR_SPACE. The first 3*ditSamples after playText("U") must be
-    // silence.
+    // CHAR_SPACE. The first 2*ditSamples after playText("U") must be
+    // silence (the prepended boundary CHAR_SPACE; total gap with T's
+    // envelope trailing is 3 spec units).
     KeyEnvelop env(20, 0.005f, 48000);
     MorseGenerator gen(&env, 20);
     int ditSamples = env.ditLengthSamples();
@@ -415,7 +417,7 @@ static void test_rumlog_ur_5NN_T_then_U() {
         gen.fillSamplesMono(buf.data(), buf.size(), 500.0f, 16384);
 
     gen.playText("U");
-    int nz = countNonZeroInWindow(gen, 3 * ditSamples);
+    int nz = countNonZeroInWindow(gen, 2 * ditSamples);
     CHECK(nz == 0);
 }
 
@@ -439,8 +441,9 @@ static void test_rumlog_599_TU() {
     for (auto s : tMark) if (s != 0) ++nz;
     CHECK(nz > 0);
 
-    // Next 3 units = T→U gap (CHAR_SPACE silence)
-    std::vector<int16_t> tToU(3 * ditSamples, 0);
+    // Next 2 units = T→U gap (CHAR_SPACE silence; plus T's 1u envelope
+    // trailing silence = 3 spec units total).
+    std::vector<int16_t> tToU(2 * ditSamples, 0);
     gen.fillSamplesMono(tToU.data(), tToU.size(), 500.0f, 16384);
     nz = 0;
     for (auto s : tToU) if (s != 0) ++nz;
@@ -480,6 +483,81 @@ static void test_silence_only_text_does_not_wake() {
     CHECK(!DisplayTask::consumeWakeRequest());
 }
 
+// ─── First-play-after-power-cycle (TU sounds like X bug) ─────────────
+//
+// User-reported: "if i press the cardputer rst or powercycle cardpoter
+// it does not outpu the correct sound a 'TU' sounds like a 'x' letter.
+// on later 'TU' the sound is correct only the fist sending is messen."
+//
+// Repro shape: at boot the envelope is constructed at wpm=20 (the
+// sharedEnvelope() default), then MorseModel::setWPM(savedWpm) is called
+// from NVS, then the host (RUMlogNG) sends WK_SPEED which propagates to
+// the model. We must verify that the FIRST playText() of "TU" with that
+// sequence of WPM changes produces the correct inter-character silence
+// (not zero, which would make "TU" sound like "X" = -..-).
+static void test_first_play_after_wpm_change_produces_TU_not_X() {
+    // Boot defaults
+    KeyEnvelop env(20, 0.005f, 48000);
+    MorseGenerator gen(&env, 20);
+
+    // Boot sequence:
+    //   1. MorseModel::setWPM(savedWpm=15) from NVS
+    gen.setWPM(15);
+    //   2. Host WK_SPEED(25) overrides via MorseModel::setWPM(25)
+    gen.setWPM(25);
+
+    // FIRST playText call after power-cycle
+    gen.playText("TU");
+
+    int ditSamples = env.ditLengthSamples();
+
+    // T's DAH = 4 units (3 tone + 1 envelope trailing silence)
+    std::vector<int16_t> tMark(4 * ditSamples, 0);
+    gen.fillSamplesMono(tMark.data(), tMark.size(), 500.0f, 16384);
+    int nz = 0;
+    for (auto s : tMark) if (s != 0) ++nz;
+    CHECK(nz > 0);  // T's DAH tone is audible
+
+    // Next 2 units = T→U inter-character gap (CHAR_SPACE silence)
+    // If the gap is missing, the audio continues with U's first DIT
+    // (which sounds like "-..-.." = X+Y, indistinguishable as X).
+    std::vector<int16_t> tToU(2 * ditSamples, 0);
+    gen.fillSamplesMono(tToU.data(), tToU.size(), 500.0f, 16384);
+    nz = 0;
+    for (auto s : tToU) if (s != 0) ++nz;
+    CHECK(nz == 0);  // TU bug: would fail here if gap is missing
+
+    // U's first DIT (1 tone unit + 1 trailing silence)
+    std::vector<int16_t> uStart(ditSamples, 0);
+    gen.fillSamplesMono(uStart.data(), uStart.size(), 500.0f, 16384);
+    nz = 0;
+    for (auto s : uStart) if (s != 0) ++nz;
+    CHECK(nz > 0);  // U's DIT tone is audible
+}
+
+// Direct probe: encode "TU" without any prior playback, verify the
+// CHAR_SPACE between T and U is actually present in the element list.
+// This is the most isolated reproduction of the bug — if the encoder
+// skips the inter-character CHAR_SPACE on a fresh encode, that explains
+// everything.
+static void test_encoder_emits_char_space_between_T_and_U() {
+    MorseEncoder enc(20);
+    auto elems = enc.encode("TU");
+
+    // Expected: [DAH(3,true), CHAR_SPACE(2,false), DIT(1,true), DIT(1,true), DAH(3,true)]
+    CHECK_EQ(elems.size(), (size_t)5);
+    CHECK_EQ((int)elems[0].type, (int)MorseEncoder::Element::DAH);
+    CHECK(elems[0].keyDown);
+    CHECK_EQ((int)elems[1].type, (int)MorseEncoder::Element::CHAR_SPACE);
+    CHECK(!elems[1].keyDown);
+    CHECK_EQ((int)elems[2].type, (int)MorseEncoder::Element::DIT);
+    CHECK(elems[2].keyDown);
+    CHECK_EQ((int)elems[3].type, (int)MorseEncoder::Element::DIT);
+    CHECK(elems[3].keyDown);
+    CHECK_EQ((int)elems[4].type, (int)MorseEncoder::Element::DAH);
+    CHECK(elems[4].keyDown);
+}
+
 
 int main() {
     printf("=== test_morse_generator ===\n");
@@ -507,5 +585,7 @@ int main() {
     RUN(test_rumlog_599_TU);
     RUN(test_playText_wakes_screensaver_on_each_keydown_element);
     RUN(test_silence_only_text_does_not_wake);
+    RUN(test_first_play_after_wpm_change_produces_TU_not_X);
+    RUN(test_encoder_emits_char_space_between_T_and_U);
     return test_summary();
 }
