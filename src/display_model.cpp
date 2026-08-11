@@ -129,12 +129,19 @@ int MorseModel::wpm() const {
 void MorseModel::setWPM(int wpm) {
     if (wpm < 5) wpm = 5;
     if (wpm > 50) wpm = 50;
+    int prev = _wpm.load(std::memory_order_relaxed);
     _wpm.store(wpm, std::memory_order_relaxed);
 #ifndef UNIT_TEST
     // Propagate to audio engine
     if (auto keyer = AudioEngine::keyer()) keyer->setWPM(wpm);
     if (auto sk = AudioEngine::straightKeyer()) sk->setWPM(wpm);
     if (auto gen = AudioEngine::morseGen()) gen->setWPM(wpm);
+    static int s_setWPMCallNo = 0;
+    int callNo = ++s_setWPMCallNo;
+    if (callNo <= 5) {
+        Log::info("[MM-DIAG] setWPM#%d: %d -> %d (propagated to keyer/gen)",
+            callNo, prev, wpm);
+    }
 #endif
     incrementChangeCounter();
 }

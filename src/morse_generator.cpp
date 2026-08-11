@@ -93,10 +93,20 @@ void MorseGenerator::playText(const char* text) {
     // gap. Skip when the encoder produced no elements (empty
     // input) or when the first element is itself a silence
     // (would compound an existing gap). See docs/winkey.md § 13.6.
+    //
+    // The prepended CHAR_SPACE uses units=2 to match what
+    // MorseEncoder emits internally — the trailing 1 unit of
+    // envelope silence from the previous chunk's last mark
+    // completes the spec's 3-unit inter-character gap. Using
+    // units=3 here would produce a 4-unit gap (1 too long).
+    bool didPrepend = false;
+    bool wasPlayingBefore   = _wasPlaying;
+    bool wasBoundaryBefore  = _endedWithBoundarySilence;
     if (_wasPlaying && !_endedWithBoundarySilence
         && !_elements.empty() && _elements.front().keyDown) {
-        MorseEncoder::Element boundary(MorseEncoder::Element::CHAR_SPACE, 3, false);
+        MorseEncoder::Element boundary(MorseEncoder::Element::CHAR_SPACE, 2, false);
         _elements.insert(_elements.begin(), boundary);
+        didPrepend = true;
     }
     _wasPlaying               = true;
     _endedWithBoundarySilence = false;  // recomputed below in advanceToNextElement
@@ -107,15 +117,53 @@ void MorseGenerator::playText(const char* text) {
     _currentChar = _playText.empty() ? '\0' : _playText[0];
     _phase = 0.0f;  // reset sine phase so next tone starts at zero
     _phaseInc = 0.0f;
-    Log::write("[MG] playText: text=\"%s\" elements=%zu\n",
-                  _playText.c_str(), (unsigned)_elements.size());
+    // DIAGNOSTIC: first-play trace. Captures the entire state vector
+    // that determines what audio the very first playText after boot
+    // will produce. Useful when the "first TU sounds like X" bug
+    // reproduces on hardware — log grep `[MG-DIAG]` shows exactly
+    // what the encoder emitted and what WPM the generator is using.
+    static int s_playTextCallNo = 0;
+    int callNo = ++s_playTextCallNo;
+    if (callNo <= 5) {
+        Log::write("[MG-DIAG] playText#%d text=\"%s\" elts=%zu prepend=%d "
+                   "genWpm=%d encWpm=%d envWpm=%d envDitLen=%d envSampleRate=%d "
+                   "_wasPlaying(before)=%d _endedWithBoundarySilence(before)=%d\n",
+            callNo, _playText.c_str(), (unsigned)_elements.size(), (int)didPrepend,
+            _wpm, _encoder.wpm(), _env->wpm(),
+            (int)_env->ditLengthSamples(), (int)_env->sampleRate(),
+            (int)wasPlayingBefore, (int)wasBoundaryBefore);
+        // Dump each element so we can see exactly what the encoder produced.
+        for (size_t i = 0; i < _elements.size(); ++i) {
+            const auto& e = _elements[i];
+            const char* tname =
+                (e.type == MorseEncoder::Element::DIT)       ? "DIT" :
+                (e.type == MorseEncoder::Element::DAH)       ? "DAH" :
+                (e.type == MorseEncoder::Element::CHAR_SPACE) ? "CHAR_SP" :
+                (e.type == MorseEncoder::Element::WORD_SPACE) ? "WORD_SP" :
+                                                                 "ELT_SP";
+            Log::write("[MG-DIAG]   elt[%zu] type=%s units=%d keyDown=%d\n",
+                (unsigned)i, tname, (int)e.units, (int)e.keyDown);
+        }
+    } else {
+        Log::write("[MG] playText: text=\"%s\" elements=%zu\n",
+                      _playText.c_str(), (unsigned)_elements.size());
+    }
     MorseModel::instance().resetPlayerHead();  // fresh session, reset player color tracking
     // Do NOT clear the buffer — append to existing keyer text
     advanceToNextElement();
-    Log::write("[MG] after advance: currentChar='%c'(%d) isPlaying=%d\n",
-        (int)_currentChar >= 32 ? (int)_currentChar : '?',
-        (int)(unsigned char)_currentChar,
-        (int)(_state != State::IDLE));
+    if (callNo <= 5) {
+        Log::write("[MG-DIAG] playText#%d after advance: elIdx=%zu elKeyDown=%d "
+                   "elSamplePos=%d elTotalSamples=%d currentChar='%c'(%d)\n",
+            callNo, (unsigned)_elIdx, (int)_elKeyDown,
+            _elSamplePos, _elTotalSamples,
+            (int)_currentChar >= 32 ? (int)_currentChar : '?',
+            (int)(unsigned char)_currentChar);
+    } else {
+        Log::write("[MG] after advance: currentChar='%c'(%d) isPlaying=%d\n",
+            (int)_currentChar >= 32 ? (int)_currentChar : '?',
+            (int)(unsigned char)_currentChar,
+            (int)(_state != State::IDLE));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -206,8 +254,18 @@ void MorseGenerator::advanceToNextElement() {
             (int)elType);
     } else {
         // Silence element: duration = units × dit length.
-        int unitCount = (el.type == MorseEncoder::Element::WORD_SPACE)    ? 7
-                     : (el.type == MorseEncoder::Element::CHAR_SPACE)     ? 3
+        // CRITICAL: use the units value the encoder stored, NOT a hardcoded
+        // 3/7. The encoder already accounts for the 1-unit trailing silence
+        // the KeyEnvelop envelope provides at the end of the previous mark:
+        //   MORSE_SPACE = 2 units  (CHAR_SPACE)  → 1 (env trailing) + 2 = 3 spec units
+        //   MORSE_SPACE = 6 units  (WORD_SPACE)  → 1 (env trailing) + 6 = 7 spec units
+        // Hardcoding 3/7 here would produce 4/8 units total — one unit too long.
+        // That 1-unit excess has been observed to make the first play after a
+        // power-cycle sound slightly wrong (inter-character gap too long blends
+        // with the next mark's rise, "TU" can be heard as something other than
+        // "TU"). See docs/winkey.md "Inter-character silence timing".
+        int unitCount = (el.type == MorseEncoder::Element::WORD_SPACE)    ? el.units
+                     : (el.type == MorseEncoder::Element::CHAR_SPACE)     ? el.units
                      : 1;  // ELEMENT_SPACE
         _elTotalSamples = _encoder.ditLengthSamples(_env->sampleRate()) * unitCount;
         _currentEnv = nullptr;
@@ -261,6 +319,26 @@ void MorseGenerator::fillSamplesMono(int16_t* mono,
     // Click detector: flag a large sample-to-sample jump (> 10% FS = 3276)
     static int16_t s_prevSample  = 0;
     static uint32_t s_clickCount = 0;
+
+    // DIAGNOSTIC: one-shot trace of the very first fillSamplesMono call
+    // after construction. Captures what the audio task sees on its very
+    // first iteration — useful when the audio task preempts playText()
+    // before advanceToNextElement() finishes setting up the first
+    // element. Grep `[MG-DIAG-FS]` in device logs to find this.
+    static bool s_firstFillLogged = false;
+    if (!s_firstFillLogged) {
+        s_firstFillLogged = true;
+        Log::write("[MG-DIAG-FS] first fillSamplesMono call: state=%d "
+                   "_elKeyDown=%d _elSamplePos=%d _elTotalSamples=%d "
+                   "_elIdx=%zu _elements.size=%zu _currentEnv=%p "
+                   "_currentChar='%c'(%d) _phase=%.4f _phaseInc=%.6f\n",
+            (int)_state, (int)_elKeyDown, _elSamplePos, _elTotalSamples,
+            (unsigned)_elIdx, (unsigned)_elements.size(),
+            (const void*)_currentEnv,
+            (int)_currentChar >= 32 ? (int)_currentChar : '?',
+            (int)(unsigned char)_currentChar,
+            _phase, _phaseInc);
+    }
 
     for (size_t i = 0; i < frames; ++i) {
         float sample = 0.0f;
