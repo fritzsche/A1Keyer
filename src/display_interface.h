@@ -50,6 +50,15 @@ public:
     /** Show the radio-keying settings screen (On/Off toggle, ;/.). */
     virtual void showKeyingSettingsView(MorseModel& model) = 0;
 
+    /** Show the Wi-Fi scan list / "Scanning…" / scan-failed screen. */
+    virtual void showWifiScanList(MorseModel& model) = 0;
+
+    /** Show the Wi-Fi passphrase entry screen. */
+    virtual void showWifiPasswordInput(MorseModel& model) = 0;
+
+    /** Show the Wi-Fi status / IP / error screen. */
+    virtual void showWifiNetworkInfo(MorseModel& model) = 0;
+
     /** Put display into low-power / sleep mode (screen-saver). */
     virtual void powerOff() = 0;
 

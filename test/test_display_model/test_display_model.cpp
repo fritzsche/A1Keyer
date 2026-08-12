@@ -1,5 +1,6 @@
 #include "test_framework.h"
 #include "display_model.h"
+#include "text_input.h"
 
 static void test_screen_default_is_decoder() {
     auto& m = MorseModel::instance();
@@ -346,6 +347,182 @@ static void test_radio_keying_teardown_resets_to_off() {
     CHECK(!m.radioKeyingEnabled());
 }
 
+// =============================================================================
+// Wi-Fi UI mirror tests
+// =============================================================================
+
+static void test_wifi_state_default_idle() {
+    auto& m = MorseModel::instance();
+    m.setWifiState(0);
+    CHECK_EQ(m.wifiState(), 0);
+}
+
+static void test_wifi_state_set_and_get() {
+    auto& m = MorseModel::instance();
+    m.setWifiState(7);   // NetState::CONNECTED
+    CHECK_EQ(m.wifiState(), 7);
+}
+
+static void test_wifi_state_same_value_is_noop() {
+    auto& m = MorseModel::instance();
+    m.setWifiState(3);
+    uint32_t before = m.changeCounter();
+    m.setWifiState(3);
+    CHECK_EQ(m.changeCounter(), before);
+}
+
+static void test_wifi_ip_default_zero() {
+    auto& m = MorseModel::instance();
+    m.setWifiLocalIP(0);
+    CHECK_EQ(m.wifiLocalIP(), 0u);
+}
+
+static void test_wifi_ip_set_and_get() {
+    auto& m = MorseModel::instance();
+    m.setWifiLocalIP(0xC0A80164);
+    CHECK_EQ(m.wifiLocalIP(), 0xC0A80164u);
+}
+
+static void test_wifi_has_credentials_round_trip() {
+    auto& m = MorseModel::instance();
+    m.setWifiHasCredentials(false);
+    CHECK(!m.wifiHasCredentials());
+    m.setWifiHasCredentials(true);
+    CHECK(m.wifiHasCredentials());
+}
+
+static void test_wifi_cred_source_default_none() {
+    auto& m = MorseModel::instance();
+    m.setWifiCredSource(0);
+    CHECK_EQ(m.wifiCredSource(), 0);
+}
+
+static void test_wifi_cred_source_set_and_get() {
+    auto& m = MorseModel::instance();
+    m.setWifiCredSource(1);   // NetCredSource::NVS
+    CHECK_EQ(m.wifiCredSource(), 1);
+}
+
+static void test_wifi_seconds_until_retry_set_and_get() {
+    auto& m = MorseModel::instance();
+    m.setWifiSecondsUntilRetry(42);
+    CHECK_EQ(m.wifiSecondsUntilRetry(), 42u);
+}
+
+static void test_wifi_scan_count_clamps_negative() {
+    auto& m = MorseModel::instance();
+    m.setWifiScanCount(-3);
+    CHECK_EQ(m.wifiScanCount(), 0);
+}
+
+static void test_wifi_scan_cursor_clamps_within_count() {
+    auto& m = MorseModel::instance();
+    m.setWifiScanCount(3);
+    m.wifiAdjustScanCursor(+10);
+    CHECK_EQ(m.wifiScanCursor(), 2);     // clamped to last
+    m.wifiAdjustScanCursor(-10);
+    CHECK_EQ(m.wifiScanCursor(), 0);     // clamped to first
+}
+
+static void test_wifi_scan_cursor_keeps_window_visible() {
+    auto& m = MorseModel::instance();
+    m.setWifiScanCount(20);
+    m.wifiAdjustScanCursor(+8);
+    // cursor should be 8; top should follow so cursor is visible.
+    // Tied to kPageSize == 4 in network_manager.h: with delta=+8 the
+    // windowing math lands top at 8 - (4 - 1) = 5.
+    CHECK_EQ(m.wifiScanCursor(), 8);
+    CHECK_EQ(m.wifiScanTop(), 5);
+
+    m.wifiAdjustScanCursor(-8);
+    CHECK_EQ(m.wifiScanCursor(), 0);
+    CHECK_EQ(m.wifiScanTop(), 0);
+}
+
+static void test_wifi_scan_empty_list_resets_to_zero() {
+    auto& m = MorseModel::instance();
+    m.setWifiScanCount(0);
+    m.setWifiScanCursor(0);
+    m.setWifiScanTop(0);
+    m.wifiAdjustScanCursor(+3);
+    CHECK_EQ(m.wifiScanCursor(), 0);
+    CHECK_EQ(m.wifiScanTop(), 0);
+}
+
+static void test_password_input_lazily_constructed() {
+    auto& m = MorseModel::instance();
+    TextInput* ti = m.passwordInput();
+    CHECK_NOT_NULL(ti);
+    CHECK_EQ((size_t)0, ti->length());
+
+    // Subsequent calls return the same instance.
+    CHECK_EQ((void*)ti, (void*)m.passwordInput());
+}
+
+static void test_password_input_buffer_is_callers_storage() {
+    auto& m = MorseModel::instance();
+    TextInput* ti = m.passwordInput();
+    ti->clear();
+    ti->insert('A');
+    ti->insert('B');
+    CHECK_EQ((size_t)2, ti->length());
+    CHECK_STR_EQ("AB", ti->value());
+}
+
+static void test_wifi_clear_password_empties_buffer() {
+    auto& m = MorseModel::instance();
+    TextInput* ti = m.passwordInput();
+    ti->clear();
+    ti->insert('x');
+    ti->insert('y');
+    CHECK_EQ((size_t)2, ti->length());
+    m.wifiClearPassword();
+    CHECK_EQ((size_t)0, ti->length());
+}
+
+static void test_wifi_reset_ui_state_zeros_scan_and_password() {
+    auto& m = MorseModel::instance();
+    m.setWifiScanCount(5);
+    m.setWifiScanCursor(3);
+    m.setWifiScanTop(2);
+    m.passwordInput()->clear();
+    m.passwordInput()->insert('Z');
+
+    m.wifiResetUIState();
+    CHECK_EQ(m.wifiScanCursor(), 0);
+    CHECK_EQ(m.wifiScanTop(), 0);
+    CHECK_EQ((size_t)0, m.passwordInput()->length());
+}
+
+static void test_wifi_screens_round_trip() {
+    auto& m = MorseModel::instance();
+    m.setScreen(DisplayScreen::WIFI_SCAN_LIST);
+    CHECK_EQ((int)m.screen(), (int)DisplayScreen::WIFI_SCAN_LIST);
+    m.setScreen(DisplayScreen::WIFI_PASSWORD_INPUT);
+    CHECK_EQ((int)m.screen(), (int)DisplayScreen::WIFI_PASSWORD_INPUT);
+    m.setScreen(DisplayScreen::WIFI_NETWORK_INFO);
+    CHECK_EQ((int)m.screen(), (int)DisplayScreen::WIFI_NETWORK_INFO);
+    m.setScreen(DisplayScreen::DECODER);
+    CHECK_EQ((int)m.screen(), (int)DisplayScreen::DECODER);
+}
+
+static void test_wifi_teardown_to_defaults() {
+    auto& m = MorseModel::instance();
+    m.wifiResetUIState();
+    m.setWifiState(0);
+    m.setWifiLocalIP(0);
+    m.setWifiHasCredentials(false);
+    m.setWifiCredSource(0);
+    m.setWifiSecondsUntilRetry(0);
+    m.setWifiScanCount(0);
+    CHECK_EQ(m.wifiState(), 0);
+    CHECK_EQ(m.wifiLocalIP(), 0u);
+    CHECK(!m.wifiHasCredentials());
+    CHECK_EQ(m.wifiCredSource(), 0);
+    CHECK_EQ(m.wifiSecondsUntilRetry(), 0u);
+    CHECK_EQ(m.wifiScanCount(), 0);
+}
+
 int main() {
     printf("=== display_model ===\n");
     RUN(test_screen_default_is_decoder);
@@ -381,5 +558,25 @@ int main() {
     RUN(test_keying_settings_screen_round_trip);
     RUN(test_radio_keying_persists_across_screen_changes);
     RUN(test_radio_keying_teardown_resets_to_off);
+
+    RUN(test_wifi_state_default_idle);
+    RUN(test_wifi_state_set_and_get);
+    RUN(test_wifi_state_same_value_is_noop);
+    RUN(test_wifi_ip_default_zero);
+    RUN(test_wifi_ip_set_and_get);
+    RUN(test_wifi_has_credentials_round_trip);
+    RUN(test_wifi_cred_source_default_none);
+    RUN(test_wifi_cred_source_set_and_get);
+    RUN(test_wifi_seconds_until_retry_set_and_get);
+    RUN(test_wifi_scan_count_clamps_negative);
+    RUN(test_wifi_scan_cursor_clamps_within_count);
+    RUN(test_wifi_scan_cursor_keeps_window_visible);
+    RUN(test_wifi_scan_empty_list_resets_to_zero);
+    RUN(test_password_input_lazily_constructed);
+    RUN(test_password_input_buffer_is_callers_storage);
+    RUN(test_wifi_clear_password_empties_buffer);
+    RUN(test_wifi_reset_ui_state_zeros_scan_and_password);
+    RUN(test_wifi_screens_round_trip);
+    RUN(test_wifi_teardown_to_defaults);
     return test_summary();
 }

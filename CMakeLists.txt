@@ -27,6 +27,9 @@ set(LIB_SOURCES
     src/key_event_bus.cpp
     src/radio_keyer.cpp
     src/winkey_bridge.cpp
+    src/text_input.cpp
+    src/net_config.cpp
+    src/network_manager.cpp
 )
 
 # ---------------------------------------------------------------------------
@@ -44,6 +47,9 @@ foreach(SUITE IN ITEMS
     test_key_event_bus
     test_radio_keyer
     test_winkey_bridge
+    test_text_input
+    test_net_config
+    test_network_manager
 )
     add_executable(${SUITE}
         test/${SUITE}/${SUITE}.cpp

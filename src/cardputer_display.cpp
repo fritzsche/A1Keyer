@@ -15,6 +15,8 @@
 
 #include "cardputer_display.h"
 #include "Log.h"
+#include "network_manager.h"
+#include "text_input.h"
 #ifdef BOARD_CARDPUTER
 #include <M5Cardputer.h>
 #include <string>
@@ -74,6 +76,18 @@ void CardputerDisplay::render() {
         case DisplayScreen::KEYING_SETTINGS:
             updateStatusLine(model);
             showKeyingSettingsView(model);
+            break;
+        case DisplayScreen::WIFI_SCAN_LIST:
+            updateStatusLine(model);
+            showWifiScanList(model);
+            break;
+        case DisplayScreen::WIFI_PASSWORD_INPUT:
+            updateStatusLine(model);
+            showWifiPasswordInput(model);
+            break;
+        case DisplayScreen::WIFI_NETWORK_INFO:
+            updateStatusLine(model);
+            showWifiNetworkInfo(model);
             break;
         case DisplayScreen::DECODER:
         default:
@@ -313,6 +327,317 @@ void CardputerDisplay::showKeyingSettingsView(MorseModel& model) {
     M5.Display.setTextColor(0x7384);
     M5.Display.setCursor(0, MAIN_Y + 95);
     M5.Display.print(";: On   .: Off   ENTER: confirm");
+}
+
+// ─── Wi-Fi screens ───────────────────────────────────────────────────────────
+//
+// These renderers read live state directly from NetworkManager. The model
+// carries only the cursor position and the password editor — everything
+// else is owned by the manager and is safe to read from the display core
+// because all writes happen on the loop core.
+
+namespace {
+
+/// Convert the model-side int mirror of NetState to the enum.
+NetState mirrorState(int v) {
+    if (v < 0 || v > (int)NetState::DISCONNECTED) return NetState::IDLE;
+    return static_cast<NetState>((uint8_t)v);
+}
+
+const char* stateLabel(NetState s) {
+    switch (s) {
+        case NetState::IDLE:            return "ready";
+        case NetState::SCANNING:        return "scanning";
+        case NetState::SCAN_DONE:       return "choose";
+        case NetState::SCAN_FAILED:     return "scan failed";
+        case NetState::CONNECTING:      return "connecting";
+        case NetState::CONNECTED:       return "connected";
+        case NetState::CONNECT_FAILED:  return "connect failed";
+        case NetState::DISCONNECTED:    return "disconnected";
+    }
+    return "?";
+}
+
+/// SSID clipped to a width that fits a 240px row (cursor + lock + RSSI
+/// + margins). The whole row, including the trailing RSSI digit, has to
+/// land before the scrollbar thumb at x=232.
+void printSsidClipped(const char* ssid, int x, int y, int maxChars) {
+    if (!ssid) return;
+    const int n = (int)std::char_traits<char>::length(ssid);
+    if (n <= maxChars) {
+        M5.Display.print(ssid);
+    } else {
+        for (int i = 0; i < maxChars - 1; ++i) M5.Display.print(ssid[i]);
+        M5.Display.print('>');
+    }
+}
+
+}  // namespace
+
+void CardputerDisplay::showWifiScanList(MorseModel& model) {
+    const NetState st = mirrorState(model.wifiState());
+
+    // Title
+    M5.Display.setFont(nullptr);
+    M5.Display.setTextSize(2);
+    M5.Display.setTextColor(COLOR_FG);
+    M5.Display.setCursor(0, MAIN_Y + 4);
+    M5.Display.print("WiFi");
+
+    // State line right of the title
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(COLOR_ACCENT);
+    M5.Display.setCursor(50, MAIN_Y + 8);
+    M5.Display.print(stateLabel(st));
+
+    // Row counter top-right
+    M5.Display.setTextColor(0x7384);
+    M5.Display.setCursor(195, MAIN_Y + 8);
+    const int n = model.wifiScanCount();
+    M5.Display.printf("%d/%d", model.wifiScanCursor() + (n > 0 ? 1 : 0), n);
+
+    if (st == NetState::SCANNING) {
+        // Animated dots — never blocks the keyer
+        M5.Display.setFont(nullptr);
+        M5.Display.setTextSize(2);
+        M5.Display.setTextColor(COLOR_FG);
+        M5.Display.setCursor(0, MAIN_Y + 50);
+        M5.Display.print("Scanning networks");
+        const int phase = (int)(millis() / 250) % 4;
+        for (int i = 0; i < phase; ++i) M5.Display.print('.');
+        M5.Display.setTextSize(1);
+        M5.Display.setTextColor(0x7384);
+        M5.Display.setCursor(0, MAIN_Y + 95);
+        M5.Display.print("ESC: cancel");
+        return;
+    }
+
+    if (st == NetState::SCAN_FAILED || (st == NetState::SCAN_DONE && n == 0)) {
+        M5.Display.setFont(nullptr);
+        M5.Display.setTextSize(2);
+        M5.Display.setTextColor(COLOR_WARN);
+        M5.Display.setCursor(0, MAIN_Y + 36);
+        const char* msg = WifiMgr::lastErrorMessage();
+        M5.Display.print(msg[0] ? msg : "scan failed");
+        M5.Display.setTextSize(1);
+        M5.Display.setTextColor(0x7384);
+        M5.Display.setCursor(0, MAIN_Y + 95);
+        M5.Display.print("ESC: back   R: retry");
+        return;
+    }
+
+    // Four-row windowed list. Built-in bitmap font at scale 2 is
+    // ~12×20 px per glyph, the smallest size still readable at arm's
+    // length on the 240×135 LCD. 4 rows × 20 px = 80 px fits between
+    // title (y=24..40) and the hint row (y=130).
+    //
+    // Coordinate convention: setCursor(x, y) on the default bitmap font
+    // places the TOP-LEFT of the glyph at (x, y) — text grows downward
+    // from there. So `y` is the top of the row's glyph and the
+    // highlight rectangle must start at (y - 2) to give a 2 px top
+    // margin and end at (y - 2 + kRowH) for a 2 px bottom margin
+    // around the 16 px glyph.
+    constexpr int kRowH    = 20;
+    constexpr int kFirstY  = MAIN_Y + 28;   // y = 48 — first row TOP
+    constexpr int kListX   = 16;
+    constexpr int kLockX   = 196;           // 1 char lock glyph
+    constexpr int kRssiX   = 208;           // up to 3 digits (-99..0)
+    constexpr int kMaxSsid = 11;            // 11 chars × 12 px = 132 px
+
+    const int top    = model.wifiScanTop();
+    const int cursor = model.wifiScanCursor();
+    M5.Display.setTextSize(2);
+    for (int row = 0; row < WifiMgr::kPageSize; ++row) {
+        const int idx = top + row;
+        if (idx >= n) break;
+        const NetScanEntry* e = WifiMgr::scanEntry(idx);
+        if (!e) break;
+
+        const int y = kFirstY + row * kRowH;     // top of the glyph row
+        // Cursor block (full-row highlight on the selected row).
+        // Glyph extends from y to y+16; the highlight band sits from
+        // (y - 2) to (y - 2 + kRowH) so the glyph is vertically
+        // centered inside the row.
+        if (idx == cursor) {
+            M5.Display.fillRect(0, y - 2, SCREEN_W, kRowH, COLOR_ACCENT);
+            M5.Display.setTextColor(COLOR_BG);
+        } else {
+            M5.Display.setTextColor(COLOR_FG);
+        }
+        M5.Display.setCursor(kListX, y);
+        printSsidClipped(e->ssid, kListX, y, kMaxSsid);
+
+        // Lock or "o" for open
+        M5.Display.setCursor(kLockX, y);
+        M5.Display.print(e->open ? 'o' : '#');
+        // RSSI digit (capped at -9 so a single digit always fits)
+        M5.Display.setCursor(kRssiX, y);
+        const int rssi = e->rssi;
+        M5.Display.printf("%d", rssi > -9 ? rssi : (rssi / 10));
+    }
+
+    // Scrollbar on the right edge when there are more rows than fit.
+    // The track is aligned to the same vertical extent as the
+    // highlight bands: starts 2 px above the first row and spans
+    // kPageSize * kRowH.
+    if (n > WifiMgr::kPageSize) {
+        const int trackX  = SCREEN_W - 2;
+        const int trackY  = kFirstY - 2;
+        const int trackH  = WifiMgr::kPageSize * kRowH;
+        M5.Display.drawFastVLine(trackX, trackY, trackH, 0x7384);
+        const int thumbH  = std::max(4, trackH * WifiMgr::kPageSize / n);
+        const int thumbY  = trackY + (trackH - thumbH) * top / (n - WifiMgr::kPageSize);
+        M5.Display.fillRect(trackX, thumbY, 2, thumbH, COLOR_FG);
+    }
+
+    // Hint row
+    M5.Display.setFont(nullptr);
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(0x7384);
+    M5.Display.setCursor(0, MAIN_Y + 110);
+    M5.Display.print(";/.: move   ENTER: connect   ESC: back");
+}
+
+void CardputerDisplay::showWifiPasswordInput(MorseModel& model) {
+    TextInput* ti = model.passwordInput();
+
+    // SSID of the AP being joined — index 0 of the scan list is fine; the
+    // model owns the cursor so we can pull the exact entry by index.
+    const int idx = model.wifiScanCursor();
+    const NetScanEntry* e = WifiMgr::scanEntry(idx);
+
+    // Two-line title so long SSIDs are not truncated alongside the
+    // "WiFi pw" label. Both rows are size 2 (12×16 px glyphs); the
+    // input box sits one line below.
+    M5.Display.setFont(nullptr);
+    M5.Display.setTextSize(2);
+    M5.Display.setTextColor(COLOR_FG);
+    M5.Display.setCursor(0, MAIN_Y + 0);
+    M5.Display.print("WiFi pw");
+
+    // SSID row. Width budget at size 2 is 20 chars × 12 px = 240 px
+    // (= SCREEN_W), so even a long SSID like "MyHomeNetwork-5GHz" fits
+    // without clipping. The "(open)" suffix reuses the dim grey so
+    // open vs. secured is still visible at a glance.
+    M5.Display.setTextColor(COLOR_ACCENT);
+    M5.Display.setCursor(0, MAIN_Y + 18);
+    M5.Display.print(e ? e->ssid : "");
+    M5.Display.setTextColor(0x7384);
+    M5.Display.print(e ? (e->open ? " (open)" : "") : "");
+
+    // CAPS indicator — top-right of the first title row. Only drawn
+    // when the keyboard's caps lock is engaged so a run of capitals
+    // is unambiguous. Toggled by OPT in handleWifiScreen's password
+    // branch (see main.cpp).
+    if (M5Cardputer.Keyboard.capslocked()) {
+        M5.Display.setTextColor(COLOR_WARN);
+        M5.Display.setCursor(SCREEN_W - 56, MAIN_Y + 4);
+        M5.Display.setTextSize(1);
+        M5.Display.print("CAPS");
+    }
+
+    // Field box (32 px tall, holds a 16 px size-2 glyph with 8 px
+    // padding top and bottom). Moved one line down (was MAIN_Y+22)
+    // to make room for the SSID row above.
+    constexpr int kBoxX = 4;
+    constexpr int kBoxY = MAIN_Y + 38;
+    constexpr int kBoxW = SCREEN_W - 8;
+    constexpr int kBoxH = 32;
+    M5.Display.drawRect(kBoxX, kBoxY, kBoxW, kBoxH, COLOR_FG);
+
+    M5.Display.setTextColor(COLOR_FG);
+    M5.Display.setCursor(kBoxX + 6, kBoxY + 8);
+    const char* txt = ti->value();
+    const size_t len = ti->length();
+    const size_t cur = ti->cursorPos();
+    // TODO: re-enable masking once the keyboard entry path is verified.
+    // For now we always print the actual characters so the user can see
+    // what they typed while debugging the layout.
+    for (size_t i = 0; i < len; ++i) M5.Display.print(txt[i]);
+
+    // Static caret at the cursor position. textWidth() returns the
+    // scaled width at the current setTextSize(), so no extra multiplier
+    // is needed — the old `* 2` double-counted and placed the caret
+    // twice as far right as it should be. A blinking caret at 500 ms
+    // interacted badly with the 50 ms renderer cadence and produced
+    // visible flicker; the static bar is steady and far easier to read.
+    const int charW = M5.Display.textWidth("M");
+    const int cx = kBoxX + 6 + (int)cur * charW;
+    if (cx + 2 <= kBoxX + kBoxW - 4) {
+        M5.Display.fillRect(cx, kBoxY + 6, 2, kBoxH - 12, COLOR_FG);
+    }
+
+    // Hint row — kept at size 1 because the longer string with all
+    // four gestures (commit, cursor, caps, back) overflows at size 2.
+    // Placed ~10 px below the input box (which ends at MAIN_Y+70=90)
+    // so the bottom of the screen stays visible on the 135 px LCD.
+    M5.Display.setFont(nullptr);
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(0x7384);
+    M5.Display.setCursor(0, MAIN_Y + 80);
+    M5.Display.print("ENTER ok  ,/:cur  OPT caps  ESC bk");
+}
+
+void CardputerDisplay::showWifiNetworkInfo(MorseModel& model) {
+    const NetState st = mirrorState(model.wifiState());
+
+    // Five size-2 lines fit between the status bar (y=20) and the
+    // bottom edge (y=135): title, state, SSID, IP/error, hint. The
+    // retry countdown and the secrets marker (dev-only) get the gap
+    // above the hint, sized down where space is tight.
+    M5.Display.setFont(nullptr);
+    M5.Display.setTextSize(2);
+    M5.Display.setTextColor(COLOR_FG);
+    M5.Display.setCursor(0, MAIN_Y + 0);
+    M5.Display.print("WiFi");
+    M5.Display.setTextColor(COLOR_ACCENT);
+    M5.Display.setCursor(56, MAIN_Y + 0);
+    M5.Display.print(stateLabel(st));
+
+    // SSID on its own line so the value can be long enough to read
+    M5.Display.setTextColor(COLOR_FG);
+    M5.Display.setCursor(0, MAIN_Y + 22);
+    M5.Display.print("SSID:");
+    M5.Display.setCursor(68, MAIN_Y + 22);
+    const char* ssid = WifiMgr::connectedSSID();
+    M5.Display.print(ssid[0] ? ssid : "(none)");
+
+    // IP, or the latest error
+    M5.Display.setCursor(0, MAIN_Y + 44);
+    if (WifiMgr::isConnected()) {
+        const uint32_t ip = model.wifiLocalIP();
+        const uint8_t a = (uint8_t)(ip >> 24);
+        const uint8_t b = (uint8_t)(ip >> 16);
+        const uint8_t c = (uint8_t)(ip >>  8);
+        const uint8_t d = (uint8_t)(ip);
+        M5.Display.printf("IP: %u.%u.%u.%u", a, b, c, d);
+    } else {
+        M5.Display.setTextColor(COLOR_WARN);
+        const char* msg = WifiMgr::lastErrorMessage();
+        M5.Display.print(msg[0] ? msg : "(no connection)");
+    }
+    M5.Display.setTextColor(COLOR_FG);
+
+    // Retry countdown and credential-source marker share the same
+    // line just above the hint. At size 1 they fit alongside the
+    // hint without crowding the main info above.
+    M5.Display.setTextSize(1);
+    if (!WifiMgr::isConnected() && model.wifiSecondsUntilRetry() > 0) {
+        M5.Display.setTextColor(0x7384);
+        M5.Display.setCursor(0, MAIN_Y + 66);
+        M5.Display.printf("retry in %us", (unsigned)model.wifiSecondsUntilRetry());
+    } else if (model.wifiCredSource() == (int)NetCredSource::SECRETS_H) {
+        M5.Display.setTextColor(COLOR_WARN);
+        M5.Display.setCursor(0, MAIN_Y + 66);
+        M5.Display.print("[dev: secrets.h]");
+    }
+
+    // Hint row
+    M5.Display.setFont(nullptr);
+    M5.Display.setTextSize(2);
+    M5.Display.setTextColor(0x7384);
+    M5.Display.setCursor(0, MAIN_Y + 98);
+    M5.Display.print("X: forget  R: retry  ENT: back");
 }
 
 void CardputerDisplay::renderScrollingText(const char* text, size_t textLen, size_t maxVisible) {

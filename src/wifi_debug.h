@@ -48,4 +48,10 @@ public:
 
     /// Current local IPv4 (0.0.0.0 when not connected).
     static uint32_t localIP();
+
+    /// Read the dev-only SSID and passphrase from src/secrets.h into
+    /// caller-provided pointers. Used as a fallback source for
+    /// NetworkManager when NVS has no stored credentials yet.
+    /// No-op when ENABLE_WIFI_DEBUG=0 — sets both outputs to nullptr.
+    static void loadFromSecrets(const char** ssid, const char** pass);
 };

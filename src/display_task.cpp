@@ -52,8 +52,15 @@ void DisplayTask::begin(DisplayInterface* display) {
                 bool displayActive = m.isDisplayActive();
                 uint32_t cur = m.changeCounter();
 
-                // Screen-saver: turn off display after DISPLAY_TIMEOUT_MS of inactivity
-                if (displayActive) {
+                // Screen-saver: turn off display after DISPLAY_TIMEOUT_MS of inactivity.
+                // The Wi-Fi screens are exempted — a half-typed passphrase or
+                // a status screen the user is reading must not blank out.
+                const bool wifiUiScreen =
+                    m.screen() == DisplayScreen::WIFI_SCAN_LIST ||
+                    m.screen() == DisplayScreen::WIFI_PASSWORD_INPUT ||
+                    m.screen() == DisplayScreen::WIFI_NETWORK_INFO;
+
+                if (displayActive && !wifiUiScreen) {
                     if (millis() - m.lastActivity() >= MorseModel::DISPLAY_TIMEOUT_MS) {
                         m.setDisplayActive(false);
                         displayActive = false;
@@ -108,8 +115,19 @@ void DisplayTask::begin(DisplayInterface* display) {
                     }
                 }
 
-                // Overlay auto-timeout
-                if (m.screen() != DisplayScreen::DECODER) {
+                // Overlay auto-timeout. Excludes the three Wi-Fi screens:
+                // a long passphrase or a slow scan would otherwise dismiss
+                // the screen mid-flow even though handleWifiScreen() refreshes
+                // the timer on every tick (a race between the display task
+                // reading overlayStartMillis and the main loop writing it can
+                // still let one tick fall past the threshold). The Wi-Fi
+                // screens are full-screen forms, not transient overlays, and
+                // they have their own explicit dismiss (Esc / Enter / X).
+                const bool isWifiScreen =
+                    m.screen() == DisplayScreen::WIFI_SCAN_LIST ||
+                    m.screen() == DisplayScreen::WIFI_PASSWORD_INPUT ||
+                    m.screen() == DisplayScreen::WIFI_NETWORK_INFO;
+                if (m.screen() != DisplayScreen::DECODER && !isWifiScreen) {
                     if (millis() - m.overlayStartMillis() >= MorseModel::OVERLAY_TIMEOUT_MS) {
                         m.setScreen(DisplayScreen::DECODER);
                         m.incrementChangeCounter();

@@ -20,6 +20,10 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "net_config.h"
+
+class TextInput;   // forward: passwordInput() returns TextInput*
+
 // ─── Enum definitions ─────────────────────────────────────────────────────────
 
 /** Display screen modes. */
@@ -33,7 +37,10 @@ enum class DisplayScreen {
     VOLUME_SETTINGS, ///< Settings: in-place volume editing with ;/., confirmed with Enter.
     MODE_VIEW,   ///< Overlay: large mode readout, auto-returns after OVERLAY_TIMEOUT_MS.
     MODE_SETTINGS, ///< Settings: in-place mode editing with ;/., confirmed with Enter.
-    KEYING_SETTINGS ///< Settings: in-place on/off radio-keying toggle, ;/., confirmed with Enter.
+    KEYING_SETTINGS,  ///< Settings: in-place on/off radio-keying toggle, ;/., confirmed with Enter.
+    WIFI_SCAN_LIST,   ///< Network config: scan list / "Scanning…" / scan failed message.
+    WIFI_PASSWORD_INPUT, ///< Network config: passphrase entry (TextInput-backed).
+    WIFI_NETWORK_INFO   ///< Network config: status, SSID, IP / error, X to forget, R to retry.
 };
 
 /** Keyer operating mode. */
@@ -498,6 +505,69 @@ public:
     /** Reset player head so next player char starts a new session (SIZE_MAX = none). */
     void resetPlayerHead();
 
+    // ─── Wi-Fi screens ───────────────────────────────────────────────────────
+    //
+    // Atomic mirrors of NetworkManager state for the display task. NetworkManager
+    // is the authority; these are populated once per loop() by main.cpp via the
+    // setter pair below. The display never reaches into NetworkManager directly
+    // so the model owns the observation contract.
+    //
+    // The error string and connected SSID come straight from NetworkManager in
+    // the renderer — they are short-lived strings that change atomically with
+    // the state and don't need to be mirrored here.
+
+    /// Current state, as an int so this header stays free of NetworkManager.
+    /// Use NetState from network_manager.h for the meaning.
+    int wifiState() const;
+    void setWifiState(int s);
+
+    /// Local IP, host-byte order, 0 when not connected.
+    uint32_t wifiLocalIP() const;
+    void setWifiLocalIP(uint32_t ip);
+
+    /// True when stored or compiled-in credentials are available.
+    bool wifiHasCredentials() const;
+    void setWifiHasCredentials(bool v);
+
+    /// Where the active credentials came from (NetCredSource int value).
+    int wifiCredSource() const;
+    void setWifiCredSource(int s);
+
+    /// Seconds until the next automatic retry (0 when none is pending).
+    uint32_t wifiSecondsUntilRetry() const;
+    void setWifiSecondsUntilRetry(uint32_t s);
+
+    /// Cursor row in the scan list. 0..scanCount()-1.
+    int wifiScanCursor() const;
+    void setWifiScanCursor(int idx);
+
+    /// Number of scan results currently visible (mirrored from the
+    /// NetworkManager by main.cpp once per loop()).
+    int wifiScanCount() const;
+    void setWifiScanCount(int n);
+
+    /// Top row of the visible scan list window. Adjusted to keep the
+    /// cursor in [top, top+kPageSize-1].
+    int wifiScanTop() const;
+    void setWifiScanTop(int top);
+
+    /// Move the scan-list cursor by `delta` and adjust `top` so the new
+    /// cursor stays in the visible window. Clamps at the list bounds.
+    void wifiAdjustScanCursor(int delta);
+
+    /// Single-line passphrase editor backing the password-entry screen.
+    /// Lazily constructed; the buffer lives inside the model so it
+    /// survives across visits to the screen. The renderer reads it via
+    /// value()/length()/reveal(); main.cpp feeds it.
+    TextInput* passwordInput();
+
+    /// Clear the password buffer (e.g. when leaving the screen).
+    void wifiClearPassword();
+
+    /// Reset all Wi-Fi UI mirrors to a known idle state (called on
+    /// enter to DECODER so a re-entrant scan starts fresh).
+    void wifiResetUIState();
+
     // ─── Private members ──────────────────────────────────────────────────────
 
 private:
@@ -555,6 +625,19 @@ private:
 
     // Index of the first player character in the circular buffer (SIZE_MAX if none)
     std::atomic<size_t> _playerHead{SIZE_MAX};
+
+    // ─── Wi-Fi UI mirrors ────────────────────────────────────────────────────
+    std::atomic<int>     _wifiState{0};
+    std::atomic<uint32_t> _wifiLocalIP{0};
+    std::atomic<bool>    _wifiHasCredentials{false};
+    std::atomic<int>     _wifiCredSource{0};
+    std::atomic<uint32_t> _wifiSecondsUntilRetry{0};
+    std::atomic<int>     _wifiScanCursor{0};
+    std::atomic<int>     _wifiScanTop{0};
+    std::atomic<int>     _wifiScanCount{0};
+
+    char       _passwordBuf[kPassBufLen] = {0};
+    TextInput* _passwordInput = nullptr;   ///< lazy; constructed in passwordInput()
 
     // Increment on ANY state change — display task re-renders when this changes
     std::atomic<uint32_t> _changeCounter{0};

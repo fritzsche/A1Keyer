@@ -273,6 +273,38 @@ public:
      */
     void showKeyingSettingsView(MorseModel& model) override;
 
+    /**
+     * showWifiScanList — render the scan list / "Scanning…" / scan-failed screen.
+     *
+     * Body is a four-row windowed list with a scrollbar thumb on the right
+     * edge. The header row shows the current NetworkManager state and the
+     * row count; the bottom row shows the key hints for the current state.
+     *
+     * @param model  MorseModel reference.
+     */
+    void showWifiScanList(MorseModel& model) override;
+
+    /**
+     * showWifiPasswordInput — render the passphrase entry screen.
+     *
+     * Shows the SSID of the network being joined at the top, a one-line
+     * masked (or revealed) field in the middle, and the bottom hint row
+     * describing the key bindings.
+     *
+     * @param model  MorseModel reference.
+     */
+    void showWifiPasswordInput(MorseModel& model) override;
+
+    /**
+     * showWifiNetworkInfo — render the network status / info screen.
+     *
+     * Shows the connection state, SSID, IP address (or the latest error
+     * message in red), and a hint row with X: forget, R: retry, ENTER: back.
+     *
+     * @param model  MorseModel reference.
+     */
+    void showWifiNetworkInfo(MorseModel& model) override;
+
     // ─── Screen-saver control ────────────────────────────────────────────────
 
     /**

@@ -17,7 +17,7 @@
 
 #include <Arduino.h>
 #include <WebServer.h>
-#include "wifi_debug.h"
+#include "network_manager.h"
 #include "console_io.h"
 #include "display_model.h"
 #include "winkey.h"
@@ -27,7 +27,6 @@
 #include "audio_engine.h"
 #include "key_event_bus.h"
 #include "log_ring.h"
-#include "wifi_debug.h"
 
 namespace {
 
@@ -60,10 +59,11 @@ void jsonEscape(String& dst, const char* src) {
 // ─── GET / — minimal HTML status page ─────────────────────────────────
 void handleRoot() {
     const auto& m  = MorseModel::instance();
-    auto  ip       = IPAddress(WifiDebug::localIP());
+    const uint32_t ip = WifiMgr::localIP();
     char  ipStr[20];
     snprintf(ipStr, sizeof(ipStr), "%u.%u.%u.%u",
-             ip[0], ip[1], ip[2], ip[3]);
+             (unsigned)(ip >> 24), (unsigned)(ip >> 16),
+             (unsigned)(ip >> 8),  (unsigned)(ip));
 
     String body;
     body.reserve(1024);
@@ -139,7 +139,7 @@ void handleState() {
         if (c) decoded += c;
     }
 
-    auto  ip    = IPAddress(WifiDebug::localIP());
+    auto  ip    = IPAddress(WifiMgr::localIP());
     char  ipStr[20];
     snprintf(ipStr, sizeof(ipStr), "%u.%u.%u.%u",
              ip[0], ip[1], ip[2], ip[3]);

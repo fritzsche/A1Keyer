@@ -24,6 +24,8 @@
 #include "radio_keyer.h"
 #include "winkey.h"
 #include "console_io.h"
+#include "network_manager.h"
+#include "text_input.h"
 #if ENABLE_WIFI_DEBUG
 #include <WiFi.h>
 #include "wifi_debug.h"
@@ -38,12 +40,253 @@
 #endif
 
 // ---------------------------------------------------------------------------
+// pollKeys — sample the Cardputer keyboard once into a CardputerKeyState.
+//
+// Reads modifier flags, special keys (Enter, Backspace, Esc) and the first
+// printable held. Returns an empty state on non-Cardputer boards and when
+// no key is down. Callers (handleKeyboard, the wifi screen handlers) feed
+// the result to TextInput::feed() for typed text, or read its fields
+// directly for navigation.
+//
+// Esc is the Fn-layer backspace position (see M5Cardputer Keyboard.h:
+// `_keys_state_buffer.esc` is set only when Fn is held). That is the
+// natural "cancel" gesture on this keyboard.
+// ---------------------------------------------------------------------------
+static CardputerKeyState pollKeys() {
+    CardputerKeyState ks{};
+#ifdef BOARD_CARDPUTER
+    auto& kb = M5Cardputer.Keyboard;
+    if (kb.keyList().empty()) return ks;
+
+    const auto& st = kb.keysState();
+    ks.anyKey    = true;
+    ks.shift     = st.shift;
+    ks.fn        = st.fn;
+    ks.opt       = st.opt;
+    ks.enter     = kb.isKeyPressed(KEY_ENTER);
+    ks.backspace = st.backspace;
+    ks.escape    = st.esc;
+
+    // Use the library's own `word` buffer (already filtered for case by
+    // the keyboard reader — see Keyboard.cpp PASS 3 which pushes the
+    // value_second / value_first into `word` only for non-special,
+    // non-modifier keys). Iterating `kb.keyList()` and calling
+    // `getKey()` instead would surface KEY_BACKSPACE (0x2a = '*') as a
+    // printable, because 0x2a sits inside the 0x20..0x7F ASCII range.
+    // The library's `word` skips it.
+    for (char c : st.word) {
+        if (c >= 0x20 && c < 0x7F) {
+            ks.printable = c;
+            break;
+        }
+    }
+#endif
+    return ks;
+}
+
+// ---------------------------------------------------------------------------
+// handleWifiScreen — per-screen keyboard routing for the three Wi-Fi screens.
+//
+// Called from handleKeyboard() AFTER the global W/F/V/M/K/D/C/N handlers.
+// The universal Enter-dismisses-overlay block at the bottom of
+// handleKeyboard() skips its work when the screen is one of the three
+// wifi screens, so the Enter pressed here reaches its destination.
+// ---------------------------------------------------------------------------
+static void handleWifiScreen(MorseModel& model, const CardputerKeyState& ks) {
+    const DisplayScreen sc = model.screen();
+
+    // Refresh the overlay timer for every wifi-screen tick. Without
+    // this, OVERLAY_TIMEOUT_MS (10 s) auto-dismisses the screen back
+    // to DECODER even while the user is mid-typing or browsing a
+    // scan list. The same responsibility is performed per-keypress in
+    // handleKeyboard() for the WPM/FREQ/VOLUME/MODE/KEYING overlays;
+    // doing it here once covers all three wifi screens.
+    model.setOverlayStartMillis(millis());
+
+    if (sc == DisplayScreen::WIFI_SCAN_LIST) {
+        static bool wasSemi = false, wasPeriod = false, wasEnter = false, wasEsc = false;
+        const bool semi   = ks.printable == ';';
+        const bool period = ks.printable == '.';
+        const bool enter  = ks.enter;
+        const bool esc    = ks.escape;
+
+        // ; = up arrow (Cardputer convention) → move towards smaller index
+        // . = down arrow                          → move towards larger index
+        if (semi   && !wasSemi)   model.wifiAdjustScanCursor(-1);
+        if (period && !wasPeriod) model.wifiAdjustScanCursor(+1);
+        if (semi || period) {
+            // The cursor moved in the model; the display task must
+            // repaint so the user actually sees the new selection.
+            DisplayTask::requestRender();
+        }
+
+        if (enter && !wasEnter) {
+            const int idx = model.wifiScanCursor();
+            const NetScanEntry* e = WifiMgr::scanEntry(idx);
+            if (e && e->open) {
+                WifiMgr::connect(idx, "");
+                model.setScreen(DisplayScreen::WIFI_NETWORK_INFO);
+            } else if (e) {
+                model.passwordInput()->clear();
+                // Enter opened this screen and is still being held. Without
+                // priming, the next tick's TextInput::feed() would see
+                // enterEdge=true on an empty buffer and commit a blank
+                // password — which kicks WifiMgr::connect(idx, "") and
+                // pops the user straight into the CONNECTING state without
+                // ever showing the password entry screen.
+                model.passwordInput()->primeEnterHeld();
+                model.setScreen(DisplayScreen::WIFI_PASSWORD_INPUT);
+            }
+            DisplayTask::requestRender();
+        }
+        if (esc && !wasEsc) {
+            WifiMgr::cancel();
+            model.wifiResetUIState();
+            model.setScreen(DisplayScreen::DECODER);
+            DisplayTask::requestRender();
+        }
+        wasSemi = semi; wasPeriod = period; wasEnter = enter; wasEsc = esc;
+        return;
+    }
+
+    if (sc == DisplayScreen::WIFI_PASSWORD_INPUT) {
+        // OPT key (bottom row, second from left) toggles caps lock.
+        // The Cardputer library's `capslocked()` flag makes `getKey()`
+        // return value_second for every letter while held, so once
+        // locked the user can type a run of capitals hands-free. OPT
+        // is a single-keystroke gesture (unlike double-tap Shift, which
+        // is fragile in practice — the user has to release Shift between
+        // taps, and the keyboard matrix scans fast enough that two quick
+        // taps can land in the same tick). OPT was previously unused.
+        // Holding Shift+letter still capitalises one char (existing
+        // behaviour through st.shift / st.word).
+        static bool wasOpt = false;
+        const bool optEdge = ks.opt && !wasOpt;
+        wasOpt = ks.opt;
+        if (optEdge) {
+#ifdef BOARD_CARDPUTER
+            M5Cardputer.Keyboard.setCapsLocked(
+                !M5Cardputer.Keyboard.capslocked());
+#endif
+            DisplayTask::requestRender();
+        }
+
+        // ',' = cursor left, '/' = cursor right. The Cardputer doesn't
+        // expose dedicated arrow keys through CardputerKeyState, so the
+        // bottom-row punctuation acts as navigation. These keys are
+        // claimed BEFORE feed() so the editor doesn't insert them as
+        // text — feed() sees a zeroed printable in that case.
+        static bool wasComma = false, wasSlash = false;
+        TextInput* ti = model.passwordInput();
+        const bool comma = ks.printable == ',';
+        const bool slash = ks.printable == '/';
+        bool cursorMoved = false;
+        if (comma && !wasComma) { ti->moveCursor(-1); cursorMoved = true; }
+        if (slash && !wasSlash) { ti->moveCursor(+1); cursorMoved = true; }
+        wasComma = comma;
+        wasSlash = slash;
+
+        CardputerKeyState ksForEditor = ks;
+        if (cursorMoved) ksForEditor.printable = 0;
+
+        // TextInput does its own edge detection against the previous tick;
+        // we just hand it the (possibly filtered) key state.
+        const TextInput::Result r = ti->feed(ksForEditor);
+        if (r == TextInput::Result::ENTER) {
+            const int idx = model.wifiScanCursor();
+            WifiMgr::connect(idx, ti->value());
+            model.setScreen(DisplayScreen::WIFI_NETWORK_INFO);
+            model.wifiClearPassword();
+            DisplayTask::requestRender();
+        } else if (r == TextInput::Result::ESC) {
+            model.wifiClearPassword();
+            model.setScreen(DisplayScreen::WIFI_SCAN_LIST);
+            DisplayTask::requestRender();
+        } else if (cursorMoved || r == TextInput::Result::CHANGED) {
+            // Buffer (or reveal flag, or cursor) moved; reflect it on
+            // screen. IDLE is intentionally ignored — repainting on
+            // every tick at 20 Hz is what made the password screen
+            // flicker. The overlay timer itself is refreshed at the
+            // top of handleWifiScreen(), so a half-typed passphrase
+            // is not auto-dismissed.
+            DisplayTask::requestRender();
+        }
+        return;
+    }
+
+    if (sc == DisplayScreen::WIFI_NETWORK_INFO) {
+        static bool wasX = false, wasR = false, wasEnter = false, wasEsc = false;
+        const bool xKey  = ks.printable == 'x' || ks.printable == 'X';
+        const bool rKey  = ks.printable == 'r' || ks.printable == 'R';
+        const bool enter = ks.enter;
+        const bool esc   = ks.escape;
+
+        if (xKey && !wasX) {
+            WifiMgr::disconnectAndForget();
+            DisplayTask::requestRender();
+        }
+        if (rKey && !wasR) {
+            WifiMgr::retry();
+            DisplayTask::requestRender();
+        }
+        // Enter / Esc leave the screen. NETWORK_INFO is not an input
+        // field, so unlike WIFI_PASSWORD_INPUT the universal
+        // Enter-dismisses-overlay block is allowed to fire here — but
+        // we still gate that block on `!onWifiScreen` for the other
+        // two wifi screens, so handle dismissal explicitly. Enter while
+        // CONNECTING also aborts the in-flight attempt via cancel().
+        if (enter && !wasEnter) {
+            if (WifiMgr::state() == NetState::CONNECTING) {
+                WifiMgr::cancel();
+            }
+            model.setScreen(DisplayScreen::DECODER);
+            DisplayTask::requestRender();
+        }
+        if (esc && !wasEsc) {
+            if (WifiMgr::state() == NetState::CONNECTING) {
+                WifiMgr::cancel();
+            }
+            model.setScreen(DisplayScreen::DECODER);
+            DisplayTask::requestRender();
+        }
+        wasX = xKey; wasR = rKey; wasEnter = enter; wasEsc = esc;
+        return;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// mirrorWifiState — copy the volatile bits of NetworkManager into MorseModel
+// once per loop tick, so the display task can render purely from the model.
+//
+// ChangeCounter-based setters no-op when the value is unchanged, so this is
+// cheap on idle ticks.
+// ---------------------------------------------------------------------------
+static void mirrorWifiState(MorseModel& model) {
+    model.setWifiState((int)WifiMgr::state());
+    model.setWifiLocalIP(WifiMgr::localIP());
+    model.setWifiHasCredentials(WifiMgr::hasSavedCredentials());
+    model.setWifiCredSource((int)WifiMgr::credentialSource());
+    model.setWifiSecondsUntilRetry(WifiMgr::secondsUntilRetry());
+    model.setWifiScanCount(WifiMgr::scanCount());
+}
+
+// ---------------------------------------------------------------------------
 // Keyboard handling — drives MorseModel state
 // ---------------------------------------------------------------------------
 static void handleKeyboard() {
 #ifdef BOARD_CARDPUTER
     auto& kb = M5Cardputer.Keyboard;
     kb.updateKeyList();
+    // Populate _keys_state_buffer (st.shift, st.backspace, st.word,
+    // etc.). The Cardputer library splits keyboard scanning across two
+    // calls: updateKeyList() fills _key_list with the held coordinates,
+    // and updateKeysState() walks that list to derive the high-level
+    // state we read via keysState() / getKey(). Only M5Cardputer.update()
+    // calls both, and our main loop calls M5.update() instead — so we
+    // must invoke updateKeysState() ourselves. Without this, st.word is
+    // empty and pollKeys() (which polls keysState() for printable chars)
+    // reports no input.
+    kb.updateKeysState();
 
     // Wake screen-saver on any keyboard activity and reset inactivity timer
     if (kb.keyList().size() > 0) {
@@ -64,6 +307,7 @@ static void handleKeyboard() {
     static bool wasW = false, wasF = false, wasP = false, wasV = false, wasM = false;
     static bool wasK = false;
     static bool wasD = false;
+    static bool wasC = false, wasN = false;
     static bool wasEnter = false, wasShift = false;
     static bool wasBtnA = false;
     static bool wasSemicolon = false, wasPeriod = false;
@@ -81,6 +325,8 @@ static void handleKeyboard() {
     bool mKey       = kb.isKeyPressed('M') || kb.isKeyPressed('m');
     bool kKey       = kb.isKeyPressed('K') || kb.isKeyPressed('k');
     bool dKey       = kb.isKeyPressed('D') || kb.isKeyPressed('d');
+    bool cKey       = kb.isKeyPressed('C') || kb.isKeyPressed('c');
+    bool nKey       = kb.isKeyPressed('N') || kb.isKeyPressed('n');
     bool enter      = kb.isKeyPressed(KEY_ENTER);
     bool shift      = kb.keysState().shift;
     bool btnA       = M5Cardputer.BtnA.isPressed();
@@ -88,11 +334,19 @@ static void handleKeyboard() {
     bool period     = kb.isKeyPressed('.');
 
     auto& model = MorseModel::instance();
+    const DisplayScreen sc = model.screen();
 
-    // W → WPM settings (toggle).
-    if (wKey && !wasW) {
+    // W → WPM settings (toggle). The gate is "not the password input
+    // field" — i.e. the function keys stay available on the wifi scan
+    // list and the wifi network-info screens, so the user can reach a
+    // settings overlay mid-wifi-flow. The only screen where we suppress
+    // the toggle is WIFI_PASSWORD_INPUT, where W must type into the
+    // passphrase field, not open WPM_SETTINGS.
+    if (wKey && !wasW &&
+        sc != DisplayScreen::WIFI_PASSWORD_INPUT &&
+        (sc == DisplayScreen::DECODER || sc == DisplayScreen::WPM_SETTINGS)) {
         Log::write("[KB] W pressed\r\n");
-        if (model.screen() == DisplayScreen::WPM_SETTINGS) {
+        if (sc == DisplayScreen::WPM_SETTINGS) {
             model.setScreen(DisplayScreen::DECODER);
         } else {
             model.setScreen(DisplayScreen::WPM_SETTINGS);
@@ -101,9 +355,11 @@ static void handleKeyboard() {
         DisplayTask::requestRender();
     }
 
-    // F → frequency settings (toggle).
-    if (fKey && !wasF) {
-        if (model.screen() == DisplayScreen::FREQ_SETTINGS) {
+    // F → frequency settings (toggle). Same gate as W.
+    if (fKey && !wasF &&
+        sc != DisplayScreen::WIFI_PASSWORD_INPUT &&
+        (sc == DisplayScreen::DECODER || sc == DisplayScreen::FREQ_SETTINGS)) {
+        if (sc == DisplayScreen::FREQ_SETTINGS) {
             model.setScreen(DisplayScreen::DECODER);
         } else {
             model.setScreen(DisplayScreen::FREQ_SETTINGS);
@@ -112,9 +368,11 @@ static void handleKeyboard() {
         DisplayTask::requestRender();
     }
 
-    // V → volume settings (toggle).
-    if (vKey && !wasV) {
-        if (model.screen() == DisplayScreen::VOLUME_SETTINGS) {
+    // V → volume settings (toggle). Same gate as W.
+    if (vKey && !wasV &&
+        sc != DisplayScreen::WIFI_PASSWORD_INPUT &&
+        (sc == DisplayScreen::DECODER || sc == DisplayScreen::VOLUME_SETTINGS)) {
+        if (sc == DisplayScreen::VOLUME_SETTINGS) {
             model.setScreen(DisplayScreen::DECODER);
         } else {
             model.setScreen(DisplayScreen::VOLUME_SETTINGS);
@@ -123,9 +381,11 @@ static void handleKeyboard() {
         DisplayTask::requestRender();
     }
 
-    // M → mode settings (toggle: Paddle / Straight).
-    if (mKey && !wasM) {
-        if (model.screen() == DisplayScreen::MODE_SETTINGS) {
+    // M → mode settings (toggle: Paddle / Straight). Same gate as W.
+    if (mKey && !wasM &&
+        sc != DisplayScreen::WIFI_PASSWORD_INPUT &&
+        (sc == DisplayScreen::DECODER || sc == DisplayScreen::MODE_SETTINGS)) {
+        if (sc == DisplayScreen::MODE_SETTINGS) {
             model.setScreen(DisplayScreen::DECODER);
         } else {
             model.setScreen(DisplayScreen::MODE_SETTINGS);
@@ -150,11 +410,33 @@ static void handleKeyboard() {
     }
     wasD = dKey;
 
+    // C → Wi-Fi scan list. Only fires from DECODER (so a stray C inside
+    // another overlay cannot interrupt it). On entry, kicks off an async
+    // scan — never blocks the keyer.
+    if (cKey && !wasC && model.screen() == DisplayScreen::DECODER) {
+        model.wifiResetUIState();
+        WifiMgr::startScan();
+        model.setScreen(DisplayScreen::WIFI_SCAN_LIST);
+        model.setOverlayStartMillis(millis());
+        DisplayTask::requestRender();
+    }
+    wasC = cKey;
+
+    // N → Wi-Fi network info / status. Same gate as C: only from DECODER.
+    if (nKey && !wasN && model.screen() == DisplayScreen::DECODER) {
+        model.setScreen(DisplayScreen::WIFI_NETWORK_INFO);
+        model.setOverlayStartMillis(millis());
+        DisplayTask::requestRender();
+    }
+    wasN = nKey;
+
     // K → keying settings (toggle On/Off radio output). Suppresses a
     // single follow-up press for hold-to-key so opening the overlay
-    // with K cannot also key the radio.
-    if (kKey && !wasK) {
-        if (model.screen() == DisplayScreen::KEYING_SETTINGS) {
+    // with K cannot also key the radio. Same gate as W/F/V/M.
+    if (kKey && !wasK &&
+        sc != DisplayScreen::WIFI_PASSWORD_INPUT &&
+        (sc == DisplayScreen::DECODER || sc == DisplayScreen::KEYING_SETTINGS)) {
+        if (sc == DisplayScreen::KEYING_SETTINGS) {
             model.setScreen(DisplayScreen::DECODER);
             suppressKUntilRelease = true;
         } else {
@@ -237,6 +519,15 @@ static void handleKeyboard() {
         if (period    && !wasPeriod)     { model.setRadioKeyingEnabled(false); DisplayTask::requestRender(); }
         model.setOverlayStartMillis(millis());
     }
+    // Wi-Fi screens: dedicated handlers. Each screen has its own edge
+    // detection; we always rebuild the keystate via pollKeys() so they see
+    // Esc/Enter/Backspace even when the printable-key short-circuits above
+    // did not fire.
+    else if (model.screen() == DisplayScreen::WIFI_SCAN_LIST ||
+             model.screen() == DisplayScreen::WIFI_PASSWORD_INPUT ||
+             model.screen() == DisplayScreen::WIFI_NETWORK_INFO) {
+        handleWifiScreen(model, pollKeys());
+    }
 
     // K hold-to-key (only when keying is enabled and we are NOT inside
     // the KEYING_SETTINGS overlay, and not suppressed by a recent
@@ -264,7 +555,15 @@ static void handleKeyboard() {
     if (!kKey) suppressKUntilRelease = false;
 
     // Enter: dismiss overlay and return to DECODER. Save settings if in settings screens.
-    if (enter && !wasEnter) {
+    // The three wifi screens are exempt — handleWifiScreen() above already
+    // gave Enter its meaning for them (select a network, commit a password,
+    // return to the scan list), and the screen it transitioned to would be
+    // immediately stomped back to DECODER otherwise.
+    const bool onWifiScreen =
+        model.screen() == DisplayScreen::WIFI_SCAN_LIST ||
+        model.screen() == DisplayScreen::WIFI_PASSWORD_INPUT ||
+        model.screen() == DisplayScreen::WIFI_NETWORK_INFO;
+    if (enter && !wasEnter && !onWifiScreen) {
         if (model.screen() == DisplayScreen::WPM_SETTINGS) {
             Preferences prefs;
             prefs.begin("morse", false);  // read-write
@@ -318,6 +617,7 @@ static void handleKeyboard() {
 
     wasW = wKey; wasF = fKey; wasV = vKey; wasM = mKey; wasK = kKey; wasShift = shift;
     wasSemicolon = semicolon; wasPeriod = period;
+    // wasC/wasN are tracked where they are used (above).
 #else
     (void)0;
 #endif
@@ -414,19 +714,35 @@ void setup() {
     Log::info("A1Keyer v%s", A1KEYER_VERSION);
     Log::info("Ready.");
 
+    // ─── Network manager ─────────────────────────────────────────────────
+    // Bring up WiFi via NetworkManager. This is non-blocking: the link
+    // comes up over the next few seconds through the WiFi-event pipeline.
+    // Stored credentials (NVS) are loaded by begin(); the secrets.h
+    // fallback is wired in only when nothing is stored yet.
+    WifiMgr::bindPlatformHal();
+    WifiMgr::begin();
+
 #if ENABLE_WIFI_DEBUG
-    // Dev-only network console. Bring up WiFi (with the credentials in
-    // git-ignored src/secrets.h), wait briefly for association, then
-    // start the HTTP server. See docs/net-debug.md (future).
-    WifiDebug::begin();
-    if (WifiDebug::isConnected() ||
-        WiFi.waitForConnectResult(5000) == WL_CONNECTED) {
+    {
+        const char* fbSsid = nullptr;
+        const char* fbPass = nullptr;
+        WifiDebug::loadFromSecrets(&fbSsid, &fbPass);
+        if (fbSsid && fbSsid[0]) {
+            WifiMgr::setFallbackCredentials(fbSsid, fbPass);
+        }
+    }
+#endif
+
+    if (WifiMgr::hasSavedCredentials()) {
+        WifiMgr::connectWithSaved();
+    }
+
+    // Dev HTTP console rides on the network manager: it starts when the
+    // link is up and reads IP from NetworkManager. Stays compiled-out in
+    // shipping builds.
+#if ENABLE_WIFI_DEBUG
+    if (WifiMgr::isConnected()) {
         ConsoleServer::begin(80);
-        IPAddress ip(WifiDebug::localIP());
-        Log::info("[net] HTTP console on http://%u.%u.%u.%u/",
-                  ip[0], ip[1], ip[2], ip[3]);
-    } else {
-        Log::warning("[net] WiFi not connected, HTTP console disabled");
     }
 #endif
 }
@@ -435,11 +751,16 @@ void loop() {
     M5.update();
     handleKeyboard();
 
+    // Service the Wi-Fi state machine and mirror its state into the model
+    // so the display task can render purely from MorseModel. The mirror
+    // setters are no-ops when values are unchanged, so idle ticks stay
+    // cheap.
+    WifiMgr::poll();
+    mirrorWifiState(MorseModel::instance());
+
 #if ENABLE_WIFI_DEBUG
-    // Service the dev network console. Both calls are no-ops when WiFi
-    // is down, so this stays cheap even in shipping builds (the gate
-    // compiles out entirely when ENABLE_WIFI_DEBUG=0).
-    WifiDebug::poll();
+    // Service the dev network console. No-op when the link is down; the
+    // gate compiles out entirely in shipping builds.
     ConsoleServer::poll();
 #endif
 

@@ -25,7 +25,7 @@
 class ConsoleServer {
 public:
     /// Start the HTTP server on the given port. No-op when
-    /// ENABLE_WIFI_DEBUG=0. Call after WifiDebug::isConnected().
+    /// ENABLE_WIFI_DEBUG=0. Call after WifiMgr::isConnected().
     static void begin(uint16_t port = 80);
 
     /// Service pending HTTP clients. Call from loop().

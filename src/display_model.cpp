@@ -1,5 +1,6 @@
 #include "display_model.h"
 #include "Log.h"
+#include "text_input.h"
 #ifndef UNIT_TEST
 #include "audio_engine.h"
 #include "radio_keyer.h"
@@ -271,4 +272,103 @@ void MorseModel::setLastCharFromPlayer(bool v) {
 
 void MorseModel::resetPlayerHead() {
     _playerHead.store(SIZE_MAX, std::memory_order_relaxed);
+}
+
+// ─── Wi-Fi UI mirrors ────────────────────────────────────────────────────────
+
+int MorseModel::wifiState() const { return _wifiState.load(std::memory_order_relaxed); }
+void MorseModel::setWifiState(int s) {
+    if (_wifiState.load(std::memory_order_relaxed) == s) return;
+    _wifiState.store(s, std::memory_order_relaxed);
+    incrementChangeCounter();
+}
+
+uint32_t MorseModel::wifiLocalIP() const { return _wifiLocalIP.load(std::memory_order_relaxed); }
+void MorseModel::setWifiLocalIP(uint32_t ip) {
+    if (_wifiLocalIP.load(std::memory_order_relaxed) == ip) return;
+    _wifiLocalIP.store(ip, std::memory_order_relaxed);
+    incrementChangeCounter();
+}
+
+bool MorseModel::wifiHasCredentials() const { return _wifiHasCredentials.load(std::memory_order_relaxed); }
+void MorseModel::setWifiHasCredentials(bool v) {
+    if (_wifiHasCredentials.load(std::memory_order_relaxed) == v) return;
+    _wifiHasCredentials.store(v, std::memory_order_relaxed);
+    incrementChangeCounter();
+}
+
+int MorseModel::wifiCredSource() const { return _wifiCredSource.load(std::memory_order_relaxed); }
+void MorseModel::setWifiCredSource(int s) {
+    if (_wifiCredSource.load(std::memory_order_relaxed) == s) return;
+    _wifiCredSource.store(s, std::memory_order_relaxed);
+    incrementChangeCounter();
+}
+
+uint32_t MorseModel::wifiSecondsUntilRetry() const {
+    return _wifiSecondsUntilRetry.load(std::memory_order_relaxed);
+}
+void MorseModel::setWifiSecondsUntilRetry(uint32_t s) {
+    _wifiSecondsUntilRetry.store(s, std::memory_order_relaxed);
+}
+
+int MorseModel::wifiScanCount() const { return _wifiScanCount.load(std::memory_order_relaxed); }
+void MorseModel::setWifiScanCount(int n) {
+    if (n < 0) n = 0;
+    if (_wifiScanCount.load(std::memory_order_relaxed) == n) return;
+    _wifiScanCount.store(n, std::memory_order_relaxed);
+    incrementChangeCounter();
+}
+
+int MorseModel::wifiScanCursor() const { return _wifiScanCursor.load(std::memory_order_relaxed); }
+void MorseModel::setWifiScanCursor(int idx) {
+    if (_wifiScanCursor.load(std::memory_order_relaxed) == idx) return;
+    _wifiScanCursor.store(idx, std::memory_order_relaxed);
+    incrementChangeCounter();
+}
+
+int MorseModel::wifiScanTop() const { return _wifiScanTop.load(std::memory_order_relaxed); }
+void MorseModel::setWifiScanTop(int top) {
+    if (_wifiScanTop.load(std::memory_order_relaxed) == top) return;
+    _wifiScanTop.store(top, std::memory_order_relaxed);
+    incrementChangeCounter();
+}
+
+void MorseModel::wifiAdjustScanCursor(int delta) {
+    const int total = _wifiScanCount.load(std::memory_order_relaxed);
+    if (total <= 0) {
+        setWifiScanCursor(0);
+        setWifiScanTop(0);
+        return;
+    }
+    int cur  = _wifiScanCursor.load(std::memory_order_relaxed);
+    int top  = _wifiScanTop.load(std::memory_order_relaxed);
+    int next = cur + delta;
+    if (next < 0) next = 0;
+    if (next >= total) next = total - 1;
+
+    constexpr int kPage = 4;   // MUST match WifiMgr::kPageSize in network_manager.h
+    if (next < top) top = next;
+    if (next >= top + kPage) top = next - (kPage - 1);
+    if (top < 0) top = 0;
+
+    setWifiScanCursor(next);
+    setWifiScanTop(top);
+}
+
+TextInput* MorseModel::passwordInput() {
+    if (!_passwordInput) {
+        _passwordInput = new TextInput(_passwordBuf, sizeof(_passwordBuf), '*');
+    }
+    return _passwordInput;
+}
+
+void MorseModel::wifiClearPassword() {
+    if (_passwordInput) _passwordInput->clear();
+    else _passwordBuf[0] = '\0';
+}
+
+void MorseModel::wifiResetUIState() {
+    setWifiScanCursor(0);
+    setWifiScanTop(0);
+    wifiClearPassword();
 }
