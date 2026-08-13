@@ -521,11 +521,12 @@ public:
     int wifiState() const;
     void setWifiState(int s);
 
-    /// Local IP, host-byte order, 0 when not connected.
+    /// Local IP, big-endian / network byte order (so `>>24` yields the
+    /// first dotted-decimal octet). 0 when not connected.
     uint32_t wifiLocalIP() const;
     void setWifiLocalIP(uint32_t ip);
 
-    /// True when stored or compiled-in credentials are available.
+    /// True when stored credentials are available.
     bool wifiHasCredentials() const;
     void setWifiHasCredentials(bool v);
 

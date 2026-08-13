@@ -7,7 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **On-device Wi-Fi configuration via the Cardputer keyboard.**
+  Press `C` from the decoder to run an asynchronous scan, `;` / `.`
+  to move the highlight, `Enter` to connect, `X` to forget the
+  stored network. Credentials are written to NVS only after the
+  association succeeds, so a typo never becomes the stored
+  credential. The NVS namespace `net` holds up to 8 slots; full
+  design in `docs/network.md`. Replaces the previous
+  `src/secrets.h`-bundled path.
+- **Dev-only HTTP console for state queries and log tail.**
+  `GET /`, `GET /state`, `GET /log?n=N` expose a JSON view of the
+  keyer state and the last N `Log::*` lines. The listener starts
+  lazily from `loop()` once the link is up. Compile with
+  `touch src/wifi_debug.enable` to enable the console in the next
+  build; `rm` it to ship a clean image. The marker is git-ignored.
+- **Wi-Fi passphrase masking.** The password input screen
+  renders each character as `*` by default; `Shift+Space` toggles
+  reveal so the user can sanity-check what they typed without
+  leaving the plaintext visible to a shoulder-surfer.
+
+### Changed
+- **Wi-Fi credentials are no longer bundled with the firmware.**
+  The `src/secrets.h` compile-time credential source has been
+  removed in favour of the on-device keyboard flow. `secrets.h`
+  used to double as the dev-console toggle; that role is now
+  served by the dedicated `src/wifi_debug.enable` marker file.
+- **`CORE_DEBUG_LEVEL` dropped from 4 to 2 for the Cardputer
+  build.** Production web-flasher images no longer stream
+  ESP-IDF `Debug`-level logs to the USB monitor. Bump back to 4
+  when you need a deep field trace and have a serial monitor
+  attached.
+
 ### Fixed
+- **Wi-Fi IP shown on screen matches the DHCP lease.** The
+  `esp_netif` GOT_IP event delivers `ip_info.ip.addr` in the
+  host-byte-order layout of the four octets on this little-endian
+  ESP32-S3, even though the underlying type is documented as
+  network byte order. Without the conversion the displayed IP
+  came back with its bytes reversed (e.g. `135.10.168.132` for a
+  `192.168.10.135` lease). `notifyGotIp` now wraps the address
+  in `htonl()` at the storage site so every consumer
+  (`WifiMgr::localIP()`, `MorseModel::wifiLocalIP()`, the HTTP
+  `/state` endpoint) sees the same big-endian layout the
+  `>>24`-yields-first-octet contract documents.
+- **Wi-Fi reconnect after reboot no longer loops through
+  `CONNECT_FAILED`.** `WiFi.begin()` while a previous association
+  is still torn down fires a synchronous `ASSOC_LEAVE` (reason 8)
+  DISCONNECTED event before the new association completes; the
+  state machine then dropped into `CONNECT_FAILED` and the
+  follow-on `GOT_IP` was silently discarded because it was only
+  handled inside the `CONNECTING` branch. The fix moves the
+  `GOT_IP` consumer to the top of `poll()` with a state guard
+  covering `CONNECTING | CONNECT_FAILED | DISCONNECTED`, and
+  also clears any pending `DISCONNECTED` queued for the same
+  tick so the new connection isn't immediately torn down. New
+  tests in `test/test_network_manager/`.
 - **WinKey prime gate: stray bytes from RUMlogNG's init sequence
   are no longer keyed as CW at boot.** The wire trace from RUMlogNG
   (captured on the live device) shows the host sends

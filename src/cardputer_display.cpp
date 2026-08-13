@@ -550,10 +550,14 @@ void CardputerDisplay::showWifiPasswordInput(MorseModel& model) {
     const char* txt = ti->value();
     const size_t len = ti->length();
     const size_t cur = ti->cursorPos();
-    // TODO: re-enable masking once the keyboard entry path is verified.
-    // For now we always print the actual characters so the user can see
-    // what they typed while debugging the layout.
-    for (size_t i = 0; i < len; ++i) M5.Display.print(txt[i]);
+    // Render each character masked by default. Shift+Space in TextInput
+    // toggles reveal() so the user can sanity-check what they typed
+    // without leaving the plaintext visible to a shoulder-surfer.
+    const bool revealed = ti->reveal();
+    const char mask = ti->maskChar();
+    for (size_t i = 0; i < len; ++i) {
+        M5.Display.print(revealed ? txt[i] : mask);
+    }
 
     // Static caret at the cursor position. textWidth() returns the
     // scaled width at the current setTextSize(), so no extra multiplier
@@ -575,7 +579,7 @@ void CardputerDisplay::showWifiPasswordInput(MorseModel& model) {
     M5.Display.setTextSize(1);
     M5.Display.setTextColor(0x7384);
     M5.Display.setCursor(0, MAIN_Y + 80);
-    M5.Display.print("ENTER ok  ,/:cur  OPT caps  ESC bk");
+    M5.Display.print("ENTER ok  ,/:cur  SH-SPC show  ESC bk");
 }
 
 void CardputerDisplay::showWifiNetworkInfo(MorseModel& model) {
@@ -583,8 +587,8 @@ void CardputerDisplay::showWifiNetworkInfo(MorseModel& model) {
 
     // Five size-2 lines fit between the status bar (y=20) and the
     // bottom edge (y=135): title, state, SSID, IP/error, hint. The
-    // retry countdown and the secrets marker (dev-only) get the gap
-    // above the hint, sized down where space is tight.
+    // retry countdown gets the gap above the hint, sized down where
+    // space is tight.
     M5.Display.setFont(nullptr);
     M5.Display.setTextSize(2);
     M5.Display.setTextColor(COLOR_FG);
