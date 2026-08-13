@@ -281,8 +281,14 @@ static void test_connect_success_stores_credentials() {
     CHECK(WifiMgr::credentialSource() == NetCredSource::NVS);
 }
 
-// A mistyped password must never become the stored credential — otherwise
-// the device would auto-connect with it forever after a reboot.
+// A mistyped password IS stored when the user commits it from the
+// password screen — see connect() in network_manager.cpp. The rationale
+// inverted from the original "save only after success" design: if the
+// first attempt fails (wrong password, weak signal, …) the user would
+// otherwise have to re-type the entire passphrase after every reboot
+// just to retry. The explicit forget path is the X key on the network-
+// info screen (disconnectAndForget), so a credential the user does not
+// want is never permanently stuck in NVS.
 static void test_failed_connect_does_not_store_credentials() {
     setup();
     scanAndSelect("wrongpw");
@@ -291,6 +297,11 @@ static void test_failed_connect_does_not_store_credentials() {
 
     CHECK(WifiMgr::state() == NetState::CONNECT_FAILED);
     NetConfig cfg;
+    netConfigLoad(cfg);
+    CHECK(cfg.hasCredentials());              // saved on commit, NOT on success
+    CHECK_STR_EQ("wrongpw", cfg.nets[0].pass);
+    // disconnectAndForget is the explicit "remove bad creds" path.
+    WifiMgr::disconnectAndForget();
     netConfigLoad(cfg);
     CHECK(!cfg.hasCredentials());
 }

@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include "Log.h"
 
 #ifndef UNIT_TEST
 #include <Arduino.h>
@@ -227,10 +228,25 @@ void connect(int scanIndex, const char* pass) {
     netCopyStr(s_ssid, sizeof(s_ssid), s_scan[scanIndex].ssid);
     netCopyStr(s_pass, sizeof(s_pass), pass);
 
-    // Persist only after the association succeeds, so a typo never
-    // becomes the stored credential.
-    s_pendingSave = true;
-    s_backoffMs   = kBackoffStartMs;
+    // Persist IMMEDIATELY when the user commits the password — not on
+    // GOT_IP. The original "save only after success" design was meant
+    // to keep typos out of NVS, but in practice it stranded the user:
+    // if the first association failed (wrong password, weak signal, an
+    // AP that simply never responded), the device silently bailed into
+    // CONNECT_FAILED with the typed passphrase only held in RAM, and
+    // the next power cycle wiped it. The user had no way to retry
+    // without retyping the entire passphrase. Saving here means the
+    // typed credentials survive any number of failed attempts, and
+    // "forget" (the X key on the network-info screen) remains the
+    // single, explicit way to remove them.
+    if (!netConfigSaveSingle(s_ssid, s_pass)) {
+        Log::warning("[NET] connect: save NVS failed; creds will not "
+                     "survive a power cycle");
+    }
+    s_source      = NetCredSource::NVS;
+    s_pendingSave = false;
+
+    s_backoffMs = kBackoffStartMs;
     cancelRetry();
     beginAssociation();
 }
@@ -305,11 +321,9 @@ void poll() {
         // DISCONNECTED on the very next poll tick.
         s_evDisconnected.store(false);
 
-        if (s_pendingSave) {
-            netConfigSaveSingle(s_ssid, s_pass);
-            s_source      = NetCredSource::NVS;
-            s_pendingSave = false;
-        }
+        // s_pendingSave is set to false in connect() once NVS has been
+        // written, so by the time we reach GOT_IP the credentials are
+        // already durable. Nothing to do here.
         s_backoffMs = kBackoffStartMs;
         cancelRetry();
         setError("");

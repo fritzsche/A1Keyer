@@ -153,5 +153,6 @@ private:
     bool _prevEnter     = false;
     bool _prevBackspace = false;
     bool _prevEscape    = false;
+    bool _prevFn        = false;
     char _prevPrintable = 0;
 };

@@ -103,12 +103,30 @@ static void handleWifiScreen(MorseModel& model, const CardputerKeyState& ks) {
     // doing it here once covers all three wifi screens.
     model.setOverlayStartMillis(millis());
 
+    // Track the screen we processed last tick. Each screen-local
+    // block below holds its own edge-detection statics that span
+    // ticks; when we transition between screens, those statics
+    // belong to whatever screen last occupied the foreground and
+    // may be stale for the new one. Priming each static to the
+    // current key state on transition means a key the user is still
+    // holding through a screen change (e.g. Enter to commit the
+    // password, then the next tick the WIFI_NETWORK_INFO handler
+    // runs) is treated as "already seen" instead of a fresh edge —
+    // which would otherwise dismiss the screen and cancel the
+    // in-flight connection the user just initiated.
+    static DisplayScreen s_lastSc = DisplayScreen::DECODER;
+    const bool screenJustChanged = (sc != s_lastSc);
+    s_lastSc = sc;
+
     if (sc == DisplayScreen::WIFI_SCAN_LIST) {
         static bool wasSemi = false, wasPeriod = false, wasEnter = false, wasEsc = false;
         const bool semi   = ks.printable == ';';
         const bool period = ks.printable == '.';
         const bool enter  = ks.enter;
         const bool esc    = ks.escape;
+        if (screenJustChanged) {
+            wasSemi = semi; wasPeriod = period; wasEnter = enter; wasEsc = esc;
+        }
 
         // ; = up arrow (Cardputer convention) → move towards smaller index
         // . = down arrow                          → move towards larger index
@@ -161,6 +179,15 @@ static void handleWifiScreen(MorseModel& model, const CardputerKeyState& ks) {
         // Holding Shift+letter still capitalises one char (existing
         // behaviour through st.shift / st.word).
         static bool wasOpt = false;
+        if (screenJustChanged) {
+            // Prime OPT (and the cursor-nav statics below) to the
+            // current key state so a key the user is still holding
+            // through the scan-list → password-input transition does
+            // not flip caps lock on entry. TextInput's own
+            // primeEnterHeld() call (in the scan-list handler) covers
+            // Enter; OPT is handled here.
+            wasOpt = ks.opt;
+        }
         const bool optEdge = ks.opt && !wasOpt;
         wasOpt = ks.opt;
         if (optEdge) {
@@ -180,6 +207,9 @@ static void handleWifiScreen(MorseModel& model, const CardputerKeyState& ks) {
         TextInput* ti = model.passwordInput();
         const bool comma = ks.printable == ',';
         const bool slash = ks.printable == '/';
+        if (screenJustChanged) {
+            wasComma = comma; wasSlash = slash;
+        }
         bool cursorMoved = false;
         if (comma && !wasComma) { ti->moveCursor(-1); cursorMoved = true; }
         if (slash && !wasSlash) { ti->moveCursor(+1); cursorMoved = true; }
@@ -220,6 +250,19 @@ static void handleWifiScreen(MorseModel& model, const CardputerKeyState& ks) {
         const bool rKey  = ks.printable == 'r' || ks.printable == 'R';
         const bool enter = ks.enter;
         const bool esc   = ks.escape;
+        if (screenJustChanged) {
+            // CRITICAL: prime Enter. The user just committed a
+            // password with an Enter press that they are very likely
+            // still holding — the natural gesture is to tap-and-hold,
+            // not tap-and-release-and-press-again. Without priming,
+            // the next tick the Enter handler would treat the still-
+            // held Enter as a fresh edge, cancel the in-flight
+            // connection (WifiMgr::state() == CONNECTING), and snap
+            // the screen back to DECODER. The user would see the
+            // connecting state for one tick at most before the device
+            // silently bailed out of the wifi flow.
+            wasX = xKey; wasR = rKey; wasEnter = enter; wasEsc = esc;
+        }
 
         if (xKey && !wasX) {
             WifiMgr::disconnectAndForget();

@@ -435,6 +435,35 @@ static void test_set_reveal_directly() {
     CHECK(!ti.reveal());
 }
 
+/// FN key alone (no printable, no shift) is the discoverable single-key
+/// reveal toggle on the password screen. Releasing FN then pressing it
+/// again must toggle twice. FN held through multiple ticks must NOT
+/// toggle more than once.
+static void test_fn_toggles_reveal() {
+    char buf[16];
+    TextInput ti(buf, sizeof(buf));
+    CardputerKeyState ks;
+    ks.fn = true;
+    CHECK(!ti.reveal());
+    CHECK(ti.feed(ks) == TextInput::Result::CHANGED);
+    CHECK(ti.reveal());
+    ti.feed(none());    // release FN
+    CHECK(ti.feed(ks) == TextInput::Result::CHANGED);   // press again
+    CHECK(!ti.reveal());
+}
+
+/// Holding FN must not auto-repeat the toggle.
+static void test_fn_held_does_not_repeat() {
+    char buf[16];
+    TextInput ti(buf, sizeof(buf));
+    CardputerKeyState ks;
+    ks.fn = true;
+    ti.feed(ks);                // press: reveal on
+    ti.feed(ks);                // still held: IDLE
+    ti.feed(ks);                // still held: IDLE
+    CHECK(ti.reveal());
+}
+
 // ─── realistic sequence ─────────────────────────────────────────────────────
 
 static void test_typical_password_entry() {
@@ -544,6 +573,8 @@ int main() {
     RUN(test_shift_space_does_not_insert);
     RUN(test_plain_space_does_not_toggle_reveal);
     RUN(test_set_reveal_directly);
+    RUN(test_fn_toggles_reveal);
+    RUN(test_fn_held_does_not_repeat);
 
     RUN(test_typical_password_entry);
     RUN(test_max_length_wpa_passphrase);

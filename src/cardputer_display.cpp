@@ -128,9 +128,25 @@ void CardputerDisplay::updateStatusLine(MorseModel& model) {
         (int)model.frequency(),
         model.volume());
 
-    // Right: battery level
-    int bat = M5Cardputer.Power.getBatteryLevel();
-    bool charging = M5Cardputer.Power.isCharging();
+    // Right: battery level. Cache the PMIC reads for 5 s so a typing
+    // session on the password screen — which triggers a full repaint on
+    // every keystroke — does not also trigger two I2C reads per
+    // keystroke. The PMIC shares the internal I2C bus with the TCA8418
+    // keyboard controller, and a busy PMIC read at the wrong moment can
+    // delay the key release the keyboard handler is waiting for, making
+    // the input feel frozen for several seconds.
+    static int     cachedBat       = -1;
+    static bool    cachedCharging  = false;
+    static uint32_t lastBatPollMs  = 0;
+    const uint32_t nowMs = millis();
+    if (cachedBat < 0 || (int32_t)(nowMs - lastBatPollMs) >= 5000) {
+        cachedBat      = M5Cardputer.Power.getBatteryLevel();
+        cachedCharging = M5Cardputer.Power.isCharging();
+        lastBatPollMs  = nowMs;
+    }
+    const int  bat      = cachedBat;
+    const bool charging = cachedCharging;
+
     M5.Display.setCursor(195, 3);
     M5.Display.setTextColor(charging ? COLOR_ACCENT : COLOR_FG);
     M5.Display.printf("%d%%", bat);
@@ -572,14 +588,14 @@ void CardputerDisplay::showWifiPasswordInput(MorseModel& model) {
     }
 
     // Hint row — kept at size 1 because the longer string with all
-    // four gestures (commit, cursor, caps, back) overflows at size 2.
+    // four gestures (commit, cursor, show, back) overflows at size 2.
     // Placed ~10 px below the input box (which ends at MAIN_Y+70=90)
     // so the bottom of the screen stays visible on the 135 px LCD.
     M5.Display.setFont(nullptr);
     M5.Display.setTextSize(1);
     M5.Display.setTextColor(0x7384);
     M5.Display.setCursor(0, MAIN_Y + 80);
-    M5.Display.print("ENTER ok  ,/:cur  SH-SPC show  ESC bk");
+    M5.Display.print("ENTER ok  ,/:cur  FN show  ESC bk");
 }
 
 void CardputerDisplay::showWifiNetworkInfo(MorseModel& model) {

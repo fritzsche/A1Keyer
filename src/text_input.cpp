@@ -95,11 +95,13 @@ TextInput::Result TextInput::feed(const CardputerKeyState& ks) {
     const bool escEdge   = ks.escape    && !_prevEscape;
     const bool enterEdge = ks.enter     && !_prevEnter;
     const bool bsEdge    = ks.backspace && !_prevBackspace;
+    const bool fnEdge    = ks.fn        && !_prevFn;
     const bool charEdge  = ks.printable != 0 && ks.printable != _prevPrintable;
 
     _prevEscape    = ks.escape;
     _prevEnter     = ks.enter;
     _prevBackspace = ks.backspace;
+    _prevFn        = ks.fn;
     _prevPrintable = ks.printable;
 
     if (escEdge)   return Result::ESC;
@@ -110,9 +112,18 @@ TextInput::Result TextInput::feed(const CardputerKeyState& ks) {
         return Result::CHANGED;
     }
 
+    if (fnEdge) {
+        // FN (bottom-left key on the Cardputer) is the discoverable
+        // single-key reveal toggle. SHIFT+SPACE remains supported as
+        // an alternate gesture but is shown nowhere in the password
+        // screen hint, so users rarely find it.
+        _reveal = !_reveal;
+        return Result::CHANGED;
+    }
+
     if (charEdge) {
-        // Shift+Space is the reveal toggle. Plain Space still types a
-        // space, because a WPA passphrase may contain one.
+        // Shift+Space is the legacy reveal toggle. Plain Space still
+        // types a space, because a WPA passphrase may contain one.
         if (ks.printable == ' ' && ks.shift) {
             _reveal = !_reveal;
             return Result::CHANGED;

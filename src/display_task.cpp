@@ -47,6 +47,12 @@ void DisplayTask::begin(DisplayInterface* display) {
             // Always render once at startup so the screen is lit immediately
             disp->render();
 
+            // Yield once at startup so loop() on Core 0 gets a chance to
+            // run before this task claims a slot. Without this the first
+            // delay(50) call can land before loop() has executed at all,
+            // and the Wi-Fi init / first keyboard read happens a frame late.
+            vTaskDelay(pdMS_TO_TICKS(1));
+
             while (true) {
                 auto& m = MorseModel::instance();
                 bool displayActive = m.isDisplayActive();
@@ -140,9 +146,20 @@ void DisplayTask::begin(DisplayInterface* display) {
         "display",
         4096,
         display,
-        5,
+        // Priority 1 (same as the Arduino loopTask on Core 0). The display
+        // task used to sit at priority 5 on Core 0, which let a single
+        // render preempt loop() for the entire duration of an SPI write
+        // burst — and with the password-input screen rendering the full
+        // masked buffer on every keystroke, those bursts could add up to
+        // 20+ seconds of loop starvation. Pinning to Core 1 puts the
+        // display renderer on the same core as the audio task (which is
+        // already at priority 22 and so wins every arbitration) and keeps
+        // it off Core 0 entirely. A Core 0 with nothing to compete with
+        // the keyboard handler responds to TCA8418 interrupts
+        // immediately.
+        1,
         &s_handle,
-        0
+        1
     );
 }
 
