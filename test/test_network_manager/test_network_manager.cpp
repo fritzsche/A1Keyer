@@ -149,32 +149,6 @@ static void test_begin_loads_stored_credentials() {
     CHECK(WifiMgr::credentialSource() == NetCredSource::NVS);
 }
 
-// ─── secrets.h fallback precedence ──────────────────────────────────────────
-
-static void test_fallback_used_when_nvs_empty() {
-    setup();
-    WifiMgr::setFallbackCredentials("DevAP", "devpw");
-    WifiMgr::begin();
-    CHECK(WifiMgr::credentialSource() == NetCredSource::SECRETS_H);
-
-    WifiMgr::connectWithSaved();
-    CHECK_EQ(1u, fake::attempts.size());
-    CHECK_EQ(std::string("DevAP"), fake::attempts[0].first);
-}
-
-// Stored credentials must beat the compiled-in ones, or a developer could
-// never override secrets.h from the device.
-static void test_stored_credentials_beat_fallback() {
-    setup();
-    netConfigSaveSingle("StoredAP", "storedpw");
-    WifiMgr::setFallbackCredentials("DevAP", "devpw");
-    WifiMgr::begin();
-    CHECK(WifiMgr::credentialSource() == NetCredSource::NVS);
-
-    WifiMgr::connectWithSaved();
-    CHECK_EQ(std::string("StoredAP"), fake::attempts[0].first);
-}
-
 // ─── scanning ───────────────────────────────────────────────────────────────
 
 static void test_scan_success() {
@@ -610,19 +584,6 @@ static void test_forget_prevents_auto_reconnect() {
     CHECK(WifiMgr::state() == NetState::IDLE);
 }
 
-// A development build must not rejoin via secrets.h after an explicit
-// forget — that would look exactly like the shadow-credential bug we are
-// guarding against.
-static void test_forget_also_drops_the_fallback() {
-    setup();
-    WifiMgr::setFallbackCredentials("DevAP", "devpw");
-    WifiMgr::begin();
-    WifiMgr::disconnectAndForget();
-    WifiMgr::begin();
-    CHECK(WifiMgr::credentialSource() == NetCredSource::NONE);
-    CHECK(!WifiMgr::hasSavedCredentials());
-}
-
 // ─── reboot behaviour ───────────────────────────────────────────────────────
 
 static void test_auto_connect_after_reboot() {
@@ -711,9 +672,6 @@ int main() {
     RUN(test_begin_without_credentials_stays_idle);
     RUN(test_begin_loads_stored_credentials);
 
-    RUN(test_fallback_used_when_nvs_empty);
-    RUN(test_stored_credentials_beat_fallback);
-
     RUN(test_scan_success);
     RUN(test_scan_entry_out_of_range_is_null);
     RUN(test_repeated_start_scan_is_ignored);
@@ -750,7 +708,6 @@ int main() {
 
     RUN(test_disconnect_and_forget_clears_everything);
     RUN(test_forget_prevents_auto_reconnect);
-    RUN(test_forget_also_drops_the_fallback);
 
     RUN(test_auto_connect_after_reboot);
     RUN(test_begin_does_not_associate);

@@ -717,33 +717,21 @@ void setup() {
     // ─── Network manager ─────────────────────────────────────────────────
     // Bring up WiFi via NetworkManager. This is non-blocking: the link
     // comes up over the next few seconds through the WiFi-event pipeline.
-    // Stored credentials (NVS) are loaded by begin(); the secrets.h
-    // fallback is wired in only when nothing is stored yet.
+    // Credentials come exclusively from NVS, populated by the on-device
+    // keyboard flow (see docs/network.md §3).
     WifiMgr::bindPlatformHal();
     WifiMgr::begin();
-
-#if ENABLE_WIFI_DEBUG
-    {
-        const char* fbSsid = nullptr;
-        const char* fbPass = nullptr;
-        WifiDebug::loadFromSecrets(&fbSsid, &fbPass);
-        if (fbSsid && fbSsid[0]) {
-            WifiMgr::setFallbackCredentials(fbSsid, fbPass);
-        }
-    }
-#endif
 
     if (WifiMgr::hasSavedCredentials()) {
         WifiMgr::connectWithSaved();
     }
 
-    // Dev HTTP console rides on the network manager: it starts when the
-    // link is up and reads IP from NetworkManager. Stays compiled-out in
-    // shipping builds.
+    // Register HTTP routes. The listener itself starts lazily from
+    // ConsoleServer::poll() once WifiMgr reports connected — see
+    // src/console_server.cpp for the lazy-init rationale. Stays
+    // compiled-out in shipping builds.
 #if ENABLE_WIFI_DEBUG
-    if (WifiMgr::isConnected()) {
-        ConsoleServer::begin(80);
-    }
+    ConsoleServer::begin(80);
 #endif
 }
 

@@ -59,7 +59,6 @@ enum class NetState : uint8_t {
 enum class NetCredSource : uint8_t {
     NONE,
     NVS,        ///< configured on the device
-    SECRETS_H,  ///< compiled-in development fallback
 };
 
 /// One access point from a scan.
@@ -112,11 +111,6 @@ inline constexpr int kPageSize = 4;
 /// Load stored credentials and prepare the radio. Does not associate.
 /// Never blocks. Safe to call once from setup().
 void begin();
-
-/// Optionally supply compiled-in credentials to use when NVS is empty
-/// (the src/secrets.h development path). Call before begin().
-/// Stored credentials always take precedence.
-void setFallbackCredentials(const char* ssid, const char* pass);
 
 /// Advance the state machine. Call every loop() iteration.
 void poll();

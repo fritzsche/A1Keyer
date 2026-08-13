@@ -2,25 +2,14 @@
  * wifi_debug.cpp — thin compatibility shim that forwards to WifiMgr.
  *
  * Previously this module owned the entire WiFi lifecycle: configuring
- * STA mode, kicking off association with secrets.h credentials, and
+ * STA mode, kicking off association with NVS credentials, and
  * reconnecting on link drop. Those responsibilities now live in
  * src/network_manager.cpp, which uses an event-driven design (Wi-Fi
  * events, not WiFi.status() polling) and owns the connection state
  * machine.
  *
  * WifiDebug is kept as a public-API shim so console_server.cpp and any
- * external tooling that referenced its symbols keeps linking. The
- * behavior of each function:
- *
- *   begin()       — no-op. main.cpp calls WifiMgr::begin() instead.
- *   poll()        — no-op. main.cpp calls WifiMgr::poll() instead.
- *   scanAndLog()  — no-op. Press 'C' on the device to run an async
- *                   scan and view results.
- *   isConnected() — forwards to WifiMgr::isConnected().
- *   localIP()     — forwards to WifiMgr::localIP().
- *   loadFromSecrets() — reads SSID/pass from src/secrets.h. Used as
- *                       the fallback source for WifiMgr when NVS is
- *                       empty (see main.cpp setup()).
+ * external tooling that referenced its symbols keeps linking.
  *
  * Gated by ENABLE_WIFI_DEBUG so the link is only pulled in for dev
  * builds; shipping firmware has no wifi_debug symbols at all.
@@ -30,7 +19,6 @@
 #if ENABLE_WIFI_DEBUG && !defined(UNIT_TEST)
 
 #include <Arduino.h>
-#include "secrets.h"
 #include "network_manager.h"
 #include "Log.h"
 
@@ -79,13 +67,6 @@ uint32_t WifiDebug::localIP() {
     return WifiMgr::localIP();
 }
 
-void WifiDebug::loadFromSecrets(const char** ssid, const char** pass) {
-    // secrets.h provides WIFI_SSID and WIFI_PASS as string literals. We
-    // hand back raw pointers to those literals; they outlive any caller.
-    if (ssid) *ssid = WIFI_SSID;
-    if (pass) *pass = WIFI_PASS;
-}
-
 #else  // ENABLE_WIFI_DEBUG == 0  OR  UNIT_TEST
 
 // Stubs so callers under `#if ENABLE_WIFI_DEBUG` always link.
@@ -94,6 +75,5 @@ void     WifiDebug::poll()        {}
 void     WifiDebug::scanAndLog()  {}
 bool     WifiDebug::isConnected() { return false; }
 uint32_t WifiDebug::localIP()     { return 0; }
-void     WifiDebug::loadFromSecrets(const char**, const char**) {}
 
 #endif

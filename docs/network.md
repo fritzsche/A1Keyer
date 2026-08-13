@@ -329,17 +329,28 @@ the keyer is already usable; the status line reflects the outcome when it
 arrives. If no credentials are stored, the radio is not brought up at
 all.
 
-### 8.1 The `secrets.h` development path
+### 8.1 The HTTP debug console
 
-The pre-existing compile-time Wi-Fi path is retained as a **fallback**,
-not removed. When `src/secrets.h` is present,
-`scripts/wifi_debug_auto.py` defines `ENABLE_WIFI_DEBUG=1` and the
-built-in HTTP debug console is compiled in.
+A small built-in HTTP server (`GET /`, `GET /state`, `GET /log?n=N`) is
+available for development and is **compiled out** of shipping builds.
+The toggle is the marker file `src/wifi_debug.enable`:
 
-Precedence: **stored credentials always win.** `secrets.h` is consulted
-only when the `net` namespace is empty. When it is the active source, the
-status line shows a `[dev:secrets.h]` marker so the operator is never
-confused about where the device got its credentials.
+- File present (e.g. `touch src/wifi_debug.enable`)
+  → `scripts/wifi_debug_auto.py` defines `ENABLE_WIFI_DEBUG=1` and the
+  HTTP console + Wi-Fi state logging are compiled in.
+- File absent → `ENABLE_WIFI_DEBUG=0`, shipping default.
+
+The marker is git-ignored, so toggling is purely local. This file used
+to be `src/secrets.h`, which conflated the credentials source with the
+debug-console flag. Credentials now live exclusively in NVS via the
+on-device keyboard flow (see §3); the marker file is empty and only
+expresses "I want the dev console in this build".
+
+The console starts listening on port 80 lazily from `loop()`: routes are
+registered at `setup()`, but `_server.begin()` only fires once
+`WifiMgr::isConnected()` returns true. This avoids the race where
+`WiFi.begin()` is non-blocking and the link is rarely up by the time
+`setup()` exits.
 
 ---
 

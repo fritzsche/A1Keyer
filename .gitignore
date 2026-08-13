@@ -8,5 +8,8 @@ CMakeCache.txt
 CMakeFiles/
 extern/
 
-# Local WiFi credentials — copy from src/secrets_template.h
-src/secrets.h
+# Dev-only marker file. Touch this file to enable the on-device
+# HTTP console (ConsoleServer + WifiDebug) for the next build; rm
+# it to disable. See scripts/wifi_debug_auto.py for the build-flag
+# toggle that reads it.
+src/wifi_debug.enable

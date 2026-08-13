@@ -31,6 +31,7 @@
 namespace {
 
 WebServer _server(80);
+bool _started = false;
 
 // jsonEscape — append src to dst with JSON-string escaping.
 // Avoids std::string to keep the dependency footprint minimal.
@@ -193,21 +194,35 @@ void handleLog() {
 }  // namespace
 
 void ConsoleServer::begin(uint16_t port) {
-    // The dev HTTP console is bound to port 80 at _server construction
-    // above (the parameter is currently unused). WebServer is not
-    // copy-assignable because it owns unique_ptr<HTTPUpload> etc., so
-    // we can't rebind to a different port here. If we ever need a
-    // configurable port, switch _server to a std::unique_ptr<WebServer>
-    // and re-allocate in begin(). For now, port 80 is fine.
+    // Bind the routes once. The HTTP listener itself starts lazily from
+    // poll() once WifiMgr reports connected, because WiFi.begin() is
+    // non-blocking and the link is rarely up by setup() exit. Calling
+    // _server.begin() here would freeze a no-listener state that never
+    // recovers — the next loop tick would skip the start gate because
+    // isConnected() is still false.
     (void)port;
+    if (_started) return;
     _server.on("/",            HTTP_GET, handleRoot);
     _server.on("/state",       HTTP_GET, handleState);
     _server.on("/log",         HTTP_GET, handleLog);
-    _server.begin();
+    _started = true;
 }
 
 void ConsoleServer::poll() {
-    _server.handleClient();
+    // Lazy start: begin the listener on the first tick after the Wi-Fi
+    // link comes up. Safe to call _server.begin() repeatedly on the
+    // WebServer library — it is idempotent. The disconnected edge stops
+    // the listener so it does not advertise a stale IP via mDNS or
+    // respond on a half-torn-down socket.
+    static bool listening = false;
+    if (!listening && _started && WifiMgr::isConnected()) {
+        _server.begin();
+        listening = true;
+    } else if (listening && !WifiMgr::isConnected()) {
+        _server.stop();
+        listening = false;
+    }
+    if (listening) _server.handleClient();
 }
 
 #else  // ENABLE_WIFI_DEBUG == 0  OR  UNIT_TEST

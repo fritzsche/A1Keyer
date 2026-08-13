@@ -4,6 +4,10 @@
 #include <cstdio>
 #include <cstring>
 
+#ifndef UNIT_TEST
+#include <Arduino.h>
+#endif
+
 // ─── reason-code mapping ────────────────────────────────────────────────────
 //
 // Values are esp_wifi's wifi_err_reason_t. Only the ones a user can act on
@@ -91,11 +95,6 @@ char          s_pass[kPassBufLen] = {0};
 NetCredSource s_source            = NetCredSource::NONE;
 bool          s_pendingSave       = false;   ///< persist on success
 
-// Compiled-in fallback (src/secrets.h development path).
-char s_fbSsid[kSsidBufLen] = {0};
-char s_fbPass[kPassBufLen] = {0};
-bool s_hasFallback         = false;
-
 char     s_connectedSsid[kSsidBufLen] = {0};
 uint32_t s_ip           = 0;
 uint32_t s_backoffMs    = kBackoffStartMs;
@@ -168,12 +167,6 @@ void harvestScanResults(int n) {
 
 namespace WifiMgr {
 
-void setFallbackCredentials(const char* ssid, const char* pass) {
-    netCopyStr(s_fbSsid, sizeof(s_fbSsid), ssid);
-    netCopyStr(s_fbPass, sizeof(s_fbPass), pass);
-    s_hasFallback = s_fbSsid[0] != '\0';
-}
-
 void begin() {
     if (s_hal.initSta) s_hal.initSta();
 
@@ -184,12 +177,6 @@ void begin() {
         netCopyStr(s_ssid, sizeof(s_ssid), cfg.nets[0].ssid);
         netCopyStr(s_pass, sizeof(s_pass), cfg.nets[0].pass);
         s_source = NetCredSource::NVS;
-    } else if (s_hasFallback) {
-        // Development path: src/secrets.h is consulted only when nothing
-        // has been configured on the device. Stored credentials always win.
-        netCopyStr(s_ssid, sizeof(s_ssid), s_fbSsid);
-        netCopyStr(s_pass, sizeof(s_pass), s_fbPass);
-        s_source = NetCredSource::SECRETS_H;
     } else {
         s_ssid[0] = '\0';
         s_pass[0] = '\0';
@@ -268,11 +255,6 @@ void disconnectAndForget() {
     s_pendingSave = false;
     s_backoffMs = kBackoffStartMs;
 
-    // The compiled-in fallback is deliberately NOT reapplied here.
-    // "Forget" must mean the device stays offline until told otherwise,
-    // otherwise a development build would silently rejoin.
-    s_hasFallback = false;
-
     cancelRetry();
     clearEvents();
     setError("");
@@ -290,6 +272,50 @@ void retry() {
 
 void poll() {
     const uint32_t t = now();
+
+    // GOT_IP must be checked BEFORE the state-specific branches. If
+    // WiFi.begin() is called while the previous session is still up,
+    // Arduino-ESP32 tears it down synchronously and fires a
+    // DISCONNECTED event (reason 8, ASSOC_LEAVE) before the new
+    // association completes. Our CONNECTING branch then transitions
+    // to CONNECT_FAILED on that spurious disconnect, and the
+    // subsequent GOT_IP — which lives only inside the CONNECTING
+    // branch — is silently dropped, leaving the device stuck in
+    // CONNECT_FAILED with a perfectly good IP it never advertises.
+    //
+    // Handling GOT_IP first lets a real DHCP success recover from the
+    // race: the IP is committed, state goes to CONNECTED, and the
+    // queued DISCONNECTED event is consumed by the CONNECTED branch's
+    // normal "link dropped" handling.
+    //
+    // Guard on the connection-state subspace so a late IP arriving
+    // after cancel() (which leaves the manager in IDLE) does not
+    // silently re-attach.
+    if (s_evGotIp.exchange(false) &&
+        (s_state == NetState::CONNECTING ||
+         s_state == NetState::CONNECT_FAILED ||
+         s_state == NetState::DISCONNECTED)) {
+        s_ip = s_evIp.load();
+        netCopyStr(s_connectedSsid, sizeof(s_connectedSsid), s_ssid);
+        // Discard any pending DISCONNECTED that arrived in the same
+        // window as this IP. It was the spurious ASSOC_LEAVE from the
+        // previous WiFi.begin() tearing down the old session; the new
+        // session is alive and addressed. Without this clear the
+        // CONNECTED branch would immediately drop us back to
+        // DISCONNECTED on the very next poll tick.
+        s_evDisconnected.store(false);
+
+        if (s_pendingSave) {
+            netConfigSaveSingle(s_ssid, s_pass);
+            s_source      = NetCredSource::NVS;
+            s_pendingSave = false;
+        }
+        s_backoffMs = kBackoffStartMs;
+        cancelRetry();
+        setError("");
+        setState(NetState::CONNECTED);
+        return;
+    }
 
     switch (s_state) {
 
@@ -320,22 +346,11 @@ void poll() {
     }
 
     case NetState::CONNECTING: {
-        if (s_evGotIp.exchange(false)) {
-            s_ip = s_evIp.load();
-            netCopyStr(s_connectedSsid, sizeof(s_connectedSsid), s_ssid);
-            s_evDisconnected.store(false);
-
-            if (s_pendingSave) {
-                netConfigSaveSingle(s_ssid, s_pass);
-                s_source      = NetCredSource::NVS;
-                s_pendingSave = false;
-            }
-            s_backoffMs = kBackoffStartMs;   // a success resets the schedule
-            cancelRetry();
-            setError("");
-            setState(NetState::CONNECTED);
-            break;
-        }
+        // GOT_IP is handled at the top of poll() so a successful DHCP
+        // reply can recover from the ASSOC_LEAVE race that happens when
+        // WiFi.begin() tears down the previous session synchronously.
+        // The CONNECTING branch only needs to watch for DISCONNECTED
+        // and the 15 s timeout.
 
         if (s_evDisconnected.exchange(false)) {
             const uint8_t reason = s_evReason.load();
@@ -447,9 +462,6 @@ void resetForTest() {
     s_error[0]    = '\0';
     s_ssid[0]     = '\0';
     s_pass[0]     = '\0';
-    s_fbSsid[0]   = '\0';
-    s_fbPass[0]   = '\0';
-    s_hasFallback = false;
     s_source      = NetCredSource::NONE;
     s_pendingSave = false;
     s_connectedSsid[0] = '\0';
@@ -498,7 +510,14 @@ void halInitSta() {
     }, ARDUINO_EVENT_WIFI_SCAN_DONE);
 
     WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t info) {
-        WifiMgr::notifyGotIp((uint32_t)info.got_ip.ip_info.ip.addr);
+        // esp_netif stores ip_info.ip.addr in network byte order on big-
+        // endian systems but — empirically on this little-endian ESP32-S3
+        // — the value comes through as the host-byte-order layout of the
+        // same four octets. The project's localIP() contract is "value
+        // such that >>24 yields the first dotted-decimal octet" (see the
+        // host-side test_notify_got_ip assertion), which is big-endian /
+        // network byte order. htonl() converts from host to that layout.
+        WifiMgr::notifyGotIp(htonl((uint32_t)info.got_ip.ip_info.ip.addr));
     }, ARDUINO_EVENT_WIFI_STA_GOT_IP);
 
     WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t info) {

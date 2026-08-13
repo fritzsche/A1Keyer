@@ -1,21 +1,27 @@
 #pragma once
 /**
- * wifi_debug.h — dev-only WiFi STA lifecycle.
+ * wifi_debug.h — dev-only WiFi STA lifecycle shim.
  *
- * Brings up the ESP32-S3 WiFi radio as a station, joins the AP whose
- * credentials live in src/secrets.h (git-ignored), and reconnects if
- * the link drops. The actual IP / DNS / credentials live in secrets.h
- * so they never reach the repo.
+ * Previously this module owned the entire WiFi lifecycle: configuring
+ * STA mode, kicking off association with NVS credentials, and
+ * reconnecting on link drop. Those responsibilities now live in
+ * src/network_manager.cpp, which uses an event-driven design (Wi-Fi
+ * events, not WiFi.status() polling) and owns the connection state
+ * machine.
  *
- * This module is gated by ENABLE_WIFI_DEBUG. When the flag is 0 the
- * .cpp body is `#ifdef UNIT_TEST` or `#if ENABLE_WIFI_DEBUG` away, so
- * shipping releases are unaffected. Default in platformio.ini is 0;
- * flip to 1 for development builds.
+ * WifiDebug is kept as a public-API shim so console_server.cpp and any
+ * external tooling that referenced its symbols keeps linking. The
+ * behavior of each function:
  *
- * Future iteration: change begin() to accept credentials as parameters
- * (sourced from NVS) and skip WiFi.config() when static IP is disabled
- * (DHCP). The current shape already isolates the configuration source
- * from the WiFi subsystem so that swap is mechanical.
+ *   begin()       — no-op. main.cpp calls WifiMgr::begin() instead.
+ *   poll()        — no-op. main.cpp calls WifiMgr::poll() instead.
+ *   scanAndLog()  — no-op. Press 'C' on the device to run an async
+ *                   scan and view results.
+ *   isConnected() — forwards to WifiMgr::isConnected().
+ *   localIP()     — forwards to WifiMgr::localIP().
+ *
+ * Gated by ENABLE_WIFI_DEBUG so the link is only pulled in for dev
+ * builds; shipping firmware has no wifi_debug symbols at all.
  */
 
 #include <cstdint>
@@ -26,32 +32,9 @@
 
 class WifiDebug {
 public:
-    /// Configure STA mode with static IP and start association. Pulls
-    /// SSID/pass/IP/gateway/subnet/DNS from src/secrets.h. Non-blocking
-    /// — the link comes up over the next few seconds; poll() drives it.
-    /// No-op when ENABLE_WIFI_DEBUG=0.
     static void begin();
-
-    /// Service WiFi reconnect + log transitions. Call from loop().
-    /// No-op when ENABLE_WIFI_DEBUG=0.
     static void poll();
-
-    /// Blocking WiFi scan (~1–3 s) that dumps every visible AP to the
-    /// log, with the target SSID from src/secrets.h prefixed by '*'.
-    /// Useful for diagnosing "can't find my AP" — call on demand, or
-    /// gate at boot via WIFI_DEBUG_SCAN_AT_BOOT=1 in wifi_debug.cpp.
-    /// No-op when ENABLE_WIFI_DEBUG=0.
     static void scanAndLog();
-
-    /// True once WiFi.status() == WL_CONNECTED.
     static bool isConnected();
-
-    /// Current local IPv4 (0.0.0.0 when not connected).
     static uint32_t localIP();
-
-    /// Read the dev-only SSID and passphrase from src/secrets.h into
-    /// caller-provided pointers. Used as a fallback source for
-    /// NetworkManager when NVS has no stored credentials yet.
-    /// No-op when ENABLE_WIFI_DEBUG=0 — sets both outputs to nullptr.
-    static void loadFromSecrets(const char** ssid, const char** pass);
 };

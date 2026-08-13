@@ -626,10 +626,6 @@ void CardputerDisplay::showWifiNetworkInfo(MorseModel& model) {
         M5.Display.setTextColor(0x7384);
         M5.Display.setCursor(0, MAIN_Y + 66);
         M5.Display.printf("retry in %us", (unsigned)model.wifiSecondsUntilRetry());
-    } else if (model.wifiCredSource() == (int)NetCredSource::SECRETS_H) {
-        M5.Display.setTextColor(COLOR_WARN);
-        M5.Display.setCursor(0, MAIN_Y + 66);
-        M5.Display.print("[dev: secrets.h]");
     }
 
     // Hint row
