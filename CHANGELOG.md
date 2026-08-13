@@ -5,7 +5,7 @@ All notable changes to A1Keyer are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-08-13
 
 ### Added
 - **On-device Wi-Fi configuration via the Cardputer keyboard.**
@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to move the highlight, `Enter` to connect, `X` to forget the
   stored network. Credentials are written to NVS only after the
   association succeeds, so a typo never becomes the stored
-  credential. The NVS namespace `net` holds up to 8 slots; full
+  credential. The NVS namespace `net` holds up to 4 slots; full
   design in `docs/network.md`. Replaces the previous
   `src/secrets.h`-bundled path.
 - **Dev-only HTTP console for state queries and log tail.**
@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   renders each character as `*` by default; `Shift+Space` toggles
   reveal so the user can sanity-check what they typed without
   leaving the plaintext visible to a shoulder-surfer.
+- `run_tests.sh` — convenience wrapper around `cmake -B build &&
+  cmake --build build && ctest --test-dir build
+  --output-on-failure`. Picks a parallel-job count from `nproc` /
+  `sysctl`, accepts `--clean`, `--verbose`, `--build-only`, and
+  `--jobs N`. The README's "Repository layout" tree already
+  referenced this file; it's now an actual script.
 
 ### Changed
 - **Wi-Fi credentials are no longer bundled with the firmware.**
@@ -38,6 +44,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ESP-IDF `Debug`-level logs to the USB monitor. Bump back to 4
   when you need a deep field trace and have a serial monitor
   attached.
+- **CI removed.** `.github/workflows/ci.yml` (the matrix of
+  Ubuntu/macOS/Windows × g++/clang++ unit-test runs) has been
+  deleted. The project is a single-maintainer, MIT-licensed
+  open-source effort and the maintainer does not pay for hosted
+  CI. Unit tests are now run on the developer's own machine via
+  the new `run_tests.sh` wrapper (see "Running the unit tests" in
+  the README). The README's "CI policy" section documents the
+  rationale and lists the GitHub paid features (Code Quality, …)
+  that should remain disabled.
 
 ### Fixed
 - **Wi-Fi IP shown on screen matches the DHCP lease.** The
@@ -147,25 +162,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test/test_morse_generator/test_morse_generator.cpp`; full
   trace in `docs/winkey.md § 13.8`.
 
-### Changed
-- **CI removed.** `.github/workflows/ci.yml` (the matrix of
-  Ubuntu/macOS/Windows × g++/clang++ unit-test runs) has been
-  deleted. The project is a single-maintainer, MIT-licensed
-  open-source effort and the maintainer does not pay for hosted
-  CI. Unit tests are now run on the developer's own machine via
-  the new `run_tests.sh` wrapper (see "Running the unit tests" in
-  the README). The README's "CI policy" section documents the
-  rationale and lists the GitHub paid features (Code Quality, …)
-  that should remain disabled.
-
-### Added
-- `run_tests.sh` — convenience wrapper around `cmake -B build &&
-  cmake --build build && ctest --test-dir build
-  --output-on-failure`. Picks a parallel-job count from `nproc` /
-  `sysctl`, accepts `--clean`, `--verbose`, `--build-only`, and
-  `--jobs N`. The README's "Repository layout" tree already
-  referenced this file; it's now an actual script.
-
 ## [0.1.0] - 2026-06-14
 
 First public release. This is a fresh publication of the A1Keyer firmware
@@ -195,3 +191,4 @@ This release ships a pre-built binary for the **Cardputer ADV (ESP32-S3)** only.
 - `.vscode/` and `extern/` are not tracked by Git (kept locally, ignored via `.gitignore`).
 
 [0.1.0]: https://github.com/fritzsche/A1Keyer/releases/tag/v0.1.0
+[0.2.0]: https://github.com/fritzsche/A1Keyer/releases/tag/v0.2.0
