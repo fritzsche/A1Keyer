@@ -5,6 +5,29 @@ All notable changes to A1Keyer are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-08-13
+
+Bugfix release. Restores Wi-Fi connectivity after a failed first
+association attempt.
+
+### Fixed
+- **Wi-Fi credentials persist on Enter, not only on success.**
+  The original `connect()` saved the typed passphrase to NVS only
+  after a `GOT_IP` event. If the first association attempt failed
+  (wrong password, weak signal, an AP that simply never
+  responded), the credentials were never written and a power
+  cycle left the device in the IDLE state with no remembered
+  network — the user had to re-type the entire passphrase to
+  retry. The fix inverts the contract: NVS is written inside
+  `connect()` immediately when the user commits the password, so
+  the typed credentials survive any number of failed attempts and
+  any number of reboots. The `X` (forget) key on the
+  network-info screen remains the single, explicit way to remove
+  them. The `test_failed_connect_does_not_store_credentials` test
+  was rewritten to assert the new contract: a failed connect
+  still leaves the saved credentials in place, and
+  `disconnectAndForget()` is what clears them.
+
 ## [0.2.0] - 2026-08-13
 
 ### Added
@@ -23,12 +46,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `touch src/wifi_debug.enable` to enable the console in the next
   build; `rm` it to ship a clean image. The marker is git-ignored.
 - **Wi-Fi passphrase masking.** The password input screen
-  renders each character as `*` by default. **Press `FN`** to
-  toggle reveal so the user can sanity-check what they typed
-  without leaving the plaintext visible to a shoulder-surfer.
-  `Shift+Space` remains supported as a legacy gesture but the
-  on-screen hint points to FN (the bottom-left key, easy to find
-  by touch).
+  renders each character as `*` by default; `Shift+Space` toggles
+  reveal so the user can sanity-check what they typed without
+  leaving the plaintext visible to a shoulder-surfer.
 - `run_tests.sh` — convenience wrapper around `cmake -B build &&
   cmake --build build && ctest --test-dir build
   --output-on-failure`. Picks a parallel-job count from `nproc` /
@@ -58,38 +78,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that should remain disabled.
 
 ### Fixed
-- **Wi-Fi credentials persist on Enter, not only on success.** The
-  original `connect()` saved the typed passphrase to NVS only after a
-  `GOT_IP` event. If the first association attempt failed (wrong
-  password, weak signal, an AP that simply never responded), the
-  credentials were never written and a power cycle left the device in
-  the IDLE state with no remembered network — the user had to re-type
-  the entire passphrase to retry. The fix inverts the contract: NVS
-  is written inside `connect()` immediately when the user commits the
-  password, so the typed credentials survive any number of failed
-  attempts and any number of reboots. The `X` (forget) key on the
-  network-info screen remains the single, explicit way to remove
-  them. The `test_failed_connect_does_not_store_credentials` test
-  was rewritten to assert the new contract: a failed connect still
-  leaves the saved credentials in place, and `disconnectAndForget()`
-  is what clears them.
-- **Typing on the password screen no longer stalls.** The display task
-  used to run on Core 0 at priority 5 — same core, higher priority
-  than the Arduino `loop()` task. A single render (SPI burst + PMIC
-  I2C read + `M5.Display.printf` for the masked password buffer) could
-  preempt `loop()` for tens of milliseconds, and a typing session that
-  triggers a repaint on every keystroke could add up to 20–30 s of
-  loop starvation. Two changes:
-  - **Display task pinned to Core 1, priority dropped to 1.** Core 1
-    is already home to the audio task (priority 22); making the
-    display task a low-priority peer of the loop means keyboard
-    handling on Core 0 is never preempted by a render.
-  - **Battery / charging PMIC reads are cached for 5 s.** The PMIC
-    shares the internal I2C bus with the TCA8418 keyboard controller;
-    a busy PMIC read at the wrong moment could delay the key release
-    the keyboard handler was waiting for. Refreshed in the background;
-    the status line no longer triggers an I2C transaction per
-    keystroke.
 - **Wi-Fi IP shown on screen matches the DHCP lease.** The
   `esp_netif` GOT_IP event delivers `ip_info.ip.addr` in the
   host-byte-order layout of the four octets on this little-endian
@@ -113,19 +101,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   also clears any pending `DISCONNECTED` queued for the same
   tick so the new connection isn't immediately torn down. New
   tests in `test/test_network_manager/`.
-- **Connecting screen no longer flashes past on Enter-tap-and-hold.**
-  When the user committed the password by pressing and holding
-  Enter, the `WIFI_NETWORK_INFO` screen's Enter handler treated
-  the still-held Enter on the next tick as a fresh edge, called
-  `WifiMgr::cancel()` (because state was `CONNECTING`), and
-  snapped the screen back to `DECODER`. The user would see the
-  connecting state for a single tick at most before the device
-  silently bailed out of the wifi flow. The fix primes each
-  wifi-screen edge static (`wasEnter`, `wasX`, `wasR`, `wasEsc`,
-  `wasOpt`, `wasComma`, `wasSlash`) to the current key state on
-  the tick a screen transition is observed, so a key the user
-  is holding through the change is treated as "already seen"
-  until it is released and pressed again.
 - **WinKey prime gate: stray bytes from RUMlogNG's init sequence
   are no longer keyed as CW at boot.** The wire trace from RUMlogNG
   (captured on the live device) shows the host sends
@@ -240,3 +215,4 @@ This release ships a pre-built binary for the **Cardputer ADV (ESP32-S3)** only.
 
 [0.1.0]: https://github.com/fritzsche/A1Keyer/releases/tag/v0.1.0
 [0.2.0]: https://github.com/fritzsche/A1Keyer/releases/tag/v0.2.0
+[0.3.0]: https://github.com/fritzsche/A1Keyer/releases/tag/v0.3.0
