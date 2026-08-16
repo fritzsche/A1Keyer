@@ -5,6 +5,27 @@ All notable changes to A1Keyer are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Paddle polarity setting (`S`) — Normal / Reversed.** Press `S` on the
+  decoder screen to open the **POLARITY** overlay, `;` for Normal, `.` for
+  Reversed, `Enter` to save. When Reversed, the physical dit lever sounds a
+  dah and vice versa, exactly as if the paddle cable had been rewired — which
+  is the point: an operator whose paddle is wired backwards (or a left-handed
+  operator who prefers the other orientation) no longer has to rewire the
+  Grove cable or reflash. The change is applied to the running keyer
+  immediately and persisted to the `morse` NVS namespace under the key
+  `polarity` (bool, default `false` = Normal).
+
+  The swap affects **only the iambic keyer**. It is implemented entirely
+  inside `IambicKeyer` by mapping the `s_keyState` array subscript at the
+  points where the keyer reads paddle memory, leaving the element identity
+  (what is sounded and what reaches the decoder) untouched. The ISRs keep
+  writing physical pin state, so the straight key, the `dit || dah`
+  paddle-held checks and the decoder are all unaffected. Physical lever
+  priority is preserved on a squeeze, so iambic alternation mirrors correctly.
+
 ## [0.3.0] - 2026-08-13
 
 Bugfix release. Restores Wi-Fi connectivity after a failed first

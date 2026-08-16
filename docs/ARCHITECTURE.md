@@ -314,6 +314,45 @@ struct KeyState {
 extern KeyState s_keyState;
 ```
 
+### Paddle polarity (Normal / Reversed)
+
+A paddle whose dit and dah are on the wrong levers — or a left-handed
+operator who prefers the other orientation — does **not** have to
+rewire the Grove cable or reflash. Press **`S`** on the decoder
+screen to open the **POLARITY** overlay, `;` for **Normal**, `.` for
+**Reversed**, `Enter` to save. The setting is persisted in the
+`morse` NVS namespace under the key `polarity` (bool, default `false`)
+and applied to the running keyer immediately, so the swap is audible
+on the next element.
+
+The swap is confined to this class by construction. The
+`s_keyState` array subscript conflates two identities — *which
+physical lever the ISR wrote* and *which element to sound*. Only the
+former is swapped, never the latter: `_reversed` is an
+`std::atomic<bool>` and every `s_keyState` read in this file goes
+through a small involution
+
+```cpp
+inline int phys(int elementIdx) const {
+    return _reversed.load(std::memory_order_relaxed) ? (elementIdx ^ 1) : elementIdx;
+}
+```
+
+so `memory[phys(DIT_IDX)]` is the DIT lever when polarity is Normal
+and the DAH lever when Reversed. `startElement(DIT_IDX)` is still
+called with the element identity, so the decoder ring buffer, the
+sidetone, and the `dit || dah` paddle-held checks all see the
+intended element. The straight-keyer path, the radio-keying output,
+the `K`-as-straight-key feature, and the GPIO ISRs are not touched.
+
+On a polarity change, `setReversed()` clears `s_keyState.memory[]`
+and `state[]` so a press latched under the old orientation cannot
+fire a phantom element after the swap. Physical-lever priority is
+preserved on a squeeze — squeezing both levers with polarity
+Reversed always starts on the lever you actually pushed first,
+which mirrors what would happen if the cable were physically
+rewired.
+
 ### Iambic B decision tree
 
 At every element boundary, exactly one of three things happens:
@@ -552,8 +591,10 @@ transitions within a single visible line — no fragile arithmetic over
 
 ### Settings persistence
 
-`Preferences` (NVS) stores WPM, frequency, volume, and keyer type. Saved
-on Enter from each settings screen, loaded on boot.
+`Preferences` (NVS) stores WPM, frequency, volume, keyer type, radio-keying
+flag, and paddle polarity (Normal / Reversed). Saved on Enter from each
+settings screen, loaded on boot. A missing key falls back to its default,
+so no version field or migration is needed when a setting is added.
 
 ### Screen-saver
 

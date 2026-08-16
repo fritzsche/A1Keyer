@@ -50,6 +50,9 @@ public:
     /** Show the radio-keying settings screen (On/Off toggle, ;/.). */
     virtual void showKeyingSettingsView(MorseModel& model) = 0;
 
+    /** Show the paddle-polarity settings screen (Normal/Reversed toggle, ;/.). */
+    virtual void showPolaritySettingsView(MorseModel& model) = 0;
+
     /** Show the Wi-Fi scan list / "Scanning…" / scan-failed screen. */
     virtual void showWifiScanList(MorseModel& model) = 0;
 

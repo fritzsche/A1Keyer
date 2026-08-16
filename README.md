@@ -22,8 +22,8 @@ trainer. You connect a key, you send CW, and the device:
   the last ~200 characters visible at any time.
 - **Plays text** — type a string and A1Keyer renders it as CW through the
   same audio path, so you can practise copying by ear.
-- **Persists your settings** (WPM, tone, volume, keyer type) to flash so the
-  device is ready the moment you power it on.
+- **Persists your settings** (WPM, tone, volume, keyer type, paddle polarity)
+  to flash so the device is ready the moment you power it on.
 
 A Tab5 (ESP32-P4) build exists in the source tree but is **not part of this
 release** — see the [CHANGELOG](CHANGELOG.md) for the rationale.
@@ -63,9 +63,9 @@ The Cardputer target shares all platform-independent code (`morse_encoder`,
   same audio path, with playback characters in a distinct colour.
 - **Click-free audio** — Blackman-Harris envelopes eliminate the keying
   transients you hear on cheaper keyers.
-- **Adjustable settings** — WPM, tone frequency, volume, and keyer type
-  (Paddle / Straight) are settable from the keyboard and **persist across
-  reboots** (NVS flash).
+- **Adjustable settings** — WPM, tone frequency, volume, keyer type
+  (Paddle / Straight) and paddle polarity (Normal / Reversed) are settable
+  from the keyboard and **persist across reboots** (NVS flash).
 - **Radio keying output** — drive a real transceiver's CW input through a
   PC817 optocoupler. Paddle, straight key, and the keyboard `K` key all
   mirror the sidetone; default Off. See [`docs/keyer.md`](docs/keyer.md).
@@ -160,15 +160,17 @@ decoder** with the last ~200 characters of decoded text.
 | **V** | Open **Volume** settings screen |
 | **M** | Open **keyer Mode** settings screen (Paddle / Straight) |
 | **K** | Open **Radio Keying** settings screen (On / Off). When On, holding `K` on the decoder screen keys the radio as a straight key. See [`docs/keyer.md`](docs/keyer.md). |
-| `;` | Increment value (WPM +1, freq +10 Hz, volume +10) — or select **Paddle** in Mode |
-| `.` | Decrement value — or select **Straight** in Mode |
+| **S** | Open **paddle polarity** settings screen (Normal / Reversed). Reversed swaps dit/dah on the paddle levers — iambic keyer only. |
+| `;` | Increment value (WPM +1, freq +10 Hz, volume +10) — or select **Paddle** in Mode, **Normal** in Polarity |
+| `.` | Decrement value — or select **Straight** in Mode, **Reversed** in Polarity |
 | **Enter** | Save current setting to flash (NVS) and close the screen |
 | **Button A** | Same as Enter — dismiss any settings screen |
 | **P** | Play **"Hello Morse!"** through the speaker (text-encoder demo) |
 | Any key | Wake the screen-saver; resets the 5-minute inactivity timer |
 
 WPM and tone frequency are **mutable while audio is running** — you can
-change them mid-sentence and the change is heard immediately. Volume and
+change them mid-sentence and the change is heard immediately. Paddle polarity
+also applies immediately (on the next element). Volume and
 keyer mode require an **Enter** (or Button A) to take effect.
 
 > **Tip:** if your straight key is producing gibberish, you probably have

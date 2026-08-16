@@ -594,6 +594,7 @@ static void handleKeyboard() {
     static bool wasK = false;
     static bool wasD = false;
     static bool wasC = false, wasN = false;
+    static bool wasS = false;
     static bool wasEnter = false, wasShift = false;
     static bool wasBtnA = false;
     static bool wasSemicolon = false, wasPeriod = false;
@@ -613,6 +614,7 @@ static void handleKeyboard() {
     bool dKey       = kb.isKeyPressed('D') || kb.isKeyPressed('d');
     bool cKey       = kb.isKeyPressed('C') || kb.isKeyPressed('c');
     bool nKey       = kb.isKeyPressed('N') || kb.isKeyPressed('n');
+    bool sKey       = kb.isKeyPressed('S') || kb.isKeyPressed('s');
     bool enter      = kb.isKeyPressed(KEY_ENTER);
     bool shift      = kb.keysState().shift;
     bool btnA       = M5Cardputer.BtnA.isPressed();
@@ -649,13 +651,14 @@ static void handleKeyboard() {
         (enter  ? 0x80 : 0) +
         (semicolon ? 0x100 : 0) +
         (period    ? 0x200 : 0) +
-        ((unsigned)pollKeys().printable << 10);
+        (sKey      ? 0x400 : 0) +
+        ((unsigned)pollKeys().printable << 11);
     if (keyStateHash != s_lastKeyState) {
         s_lastKeyState = keyStateHash;
-        Log::write("[KB-NEW] list=%d printable=%02x pKey=%d mKey=%d kKey=%d dKey=%d cKey=%d nKey=%d wKey=%d enter=%d semi=%d period=%d sc=%d\n",
+        Log::write("[KB-NEW] list=%d printable=%02x pKey=%d mKey=%d kKey=%d dKey=%d cKey=%d nKey=%d wKey=%d sKey=%d enter=%d semi=%d period=%d sc=%d\n",
             (int)kb.keyList().size(),
             (unsigned)pollKeys().printable,
-            pKey, mKey, kKey, dKey, cKey, nKey, wKey,
+            pKey, mKey, kKey, dKey, cKey, nKey, wKey, sKey,
             enter, semicolon, period, (int)sc);
     }
 
@@ -669,7 +672,7 @@ static void handleKeyboard() {
     // cut off audio after only a click of the first element.
     static bool s_wasAnyKeyHeld = false;
     const bool anyKeyHeld = wKey || fKey || pKey || vKey || mKey
-                          || kKey || dKey || cKey || nKey || enter
+                          || kKey || dKey || cKey || nKey || sKey || enter
                           || semicolon || period;
     const bool anyKeyEdge = anyKeyHeld && !s_wasAnyKeyHeld;
     s_wasAnyKeyHeld = anyKeyHeld;
@@ -684,7 +687,7 @@ static void handleKeyboard() {
         // Same press still held — consume it: update wasX so the per-key
         // edge handlers below don't fire on this held press.
         wasW = wKey; wasF = fKey; wasP = pKey; wasV = vKey; wasM = mKey;
-        wasK = kKey; wasD = dKey; wasC = cKey; wasN = nKey;
+        wasK = kKey; wasD = dKey; wasC = cKey; wasN = nKey; wasS = sKey;
         wasEnter = enter; wasShift = shift; wasBtnA = btnA;
         wasSemicolon = semicolon; wasPeriod = period;
         return;
@@ -814,6 +817,22 @@ static void handleKeyboard() {
         DisplayTask::requestRender();
     }
 
+    // S → paddle polarity settings (Normal/Reversed). Same open/close gate
+    // as W/F/V/M/K. There is no hold-to-key behaviour on S, so unlike K it
+    // needs no suppress-until-release latch.
+    if (sKey && !wasS &&
+        sc != DisplayScreen::WIFI_PASSWORD_INPUT &&
+        (sc == DisplayScreen::DECODER || sc == DisplayScreen::POLARITY_SETTINGS)) {
+        Log::write("[KB] S pressed\r\n");
+        if (sc == DisplayScreen::POLARITY_SETTINGS) {
+            model.setScreen(DisplayScreen::DECODER);
+        } else {
+            model.setScreen(DisplayScreen::POLARITY_SETTINGS);
+            model.setOverlayStartMillis(millis());
+        }
+        DisplayTask::requestRender();
+    }
+
     // P → start Morse encoder playback. Suppressed while a memory
     // input field has focus — typing P as part of a contest macro
     // ("TEST DE W1AW POTA K") would otherwise fire "Hello Morse!"
@@ -890,6 +909,13 @@ static void handleKeyboard() {
     else if (model.screen() == DisplayScreen::KEYING_SETTINGS) {
         if (semicolon && !wasSemicolon) { model.setRadioKeyingEnabled(true);  DisplayTask::requestRender(); }
         if (period    && !wasPeriod)     { model.setRadioKeyingEnabled(false); DisplayTask::requestRender(); }
+        model.setOverlayStartMillis(millis());
+    }
+    // In POLARITY settings: ; = Normal, . = Reversed. Applied to the running
+    // keyer immediately (audible on the next element); Enter persists it.
+    else if (model.screen() == DisplayScreen::POLARITY_SETTINGS) {
+        if (semicolon && !wasSemicolon) { model.setPolarityReversed(false); DisplayTask::requestRender(); }
+        if (period    && !wasPeriod)     { model.setPolarityReversed(true);  DisplayTask::requestRender(); }
         model.setOverlayStartMillis(millis());
     }
     // Wi-Fi screens: dedicated handlers. Each screen has its own edge
@@ -1009,6 +1035,13 @@ static void handleKeyboard() {
             prefs.end();
             Log::write("[KB] saved keying=%d\n", model.radioKeyingEnabled() ? 1 : 0);
         }
+        if (model.screen() == DisplayScreen::POLARITY_SETTINGS) {
+            Preferences prefs;
+            prefs.begin("morse", false);  // read-write
+            prefs.putBool("polarity", model.polarityReversed());
+            prefs.end();
+            Log::write("[KB] saved polarity=%s\n", model.polarityReversed() ? "reversed" : "normal");
+        }
         if (model.screen() != DisplayScreen::DECODER) {
             model.setScreen(DisplayScreen::DECODER);
             DisplayTask::requestRender();
@@ -1027,6 +1060,7 @@ static void handleKeyboard() {
 
     wasW = wKey; wasF = fKey; wasV = vKey; wasM = mKey; wasK = kKey; wasShift = shift;
     wasSemicolon = semicolon; wasPeriod = period;
+    wasS = sKey;
     // wasC/wasN are tracked where they are used (above).
 #else
     (void)0;
@@ -1109,6 +1143,7 @@ void setup() {
         int savedVol = prefs.getInt("vol", 50);
         String savedKeyType = prefs.getString("keytype", "paddle");
         bool savedKeying = prefs.getBool("keying", false);
+        bool savedPolarity = prefs.getBool("polarity", false);
         prefs.end();
         model.setWPM(savedWpm);
         model.setFrequency((float)savedFreq);
@@ -1117,8 +1152,12 @@ void setup() {
         // Apply the persisted keying setting AFTER RadioKeyer::begin() so
         // the GPIO is owned and ready. Default is Off (safe).
         model.setRadioKeyingEnabled(savedKeying);
-        Log::write("[setup] loaded WPM=%d freq=%d vol=%d keytype=%s keying=%d from preferences\n",
-            savedWpm, savedFreq, savedVol, savedKeyType.c_str(), savedKeying ? 1 : 0);
+        // Paddle polarity — forwarded to the iambic keyer, which AudioEngine
+        // has already constructed by this point. Default is Normal.
+        model.setPolarityReversed(savedPolarity);
+        Log::write("[setup] loaded WPM=%d freq=%d vol=%d keytype=%s keying=%d polarity=%s from preferences\n",
+            savedWpm, savedFreq, savedVol, savedKeyType.c_str(), savedKeying ? 1 : 0,
+            savedPolarity ? "reversed" : "normal");
     }
 
     // Memory-keyer bank — separate NVS namespace ("memory") so clearing

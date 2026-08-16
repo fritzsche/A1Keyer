@@ -77,6 +77,10 @@ void CardputerDisplay::render() {
             updateStatusLine(model);
             showKeyingSettingsView(model);
             break;
+        case DisplayScreen::POLARITY_SETTINGS:
+            updateStatusLine(model);
+            showPolaritySettingsView(model);
+            break;
         case DisplayScreen::WIFI_SCAN_LIST:
             updateStatusLine(model);
             showWifiScanList(model);
@@ -351,6 +355,27 @@ void CardputerDisplay::showKeyingSettingsView(MorseModel& model) {
     M5.Display.setTextColor(0x7384);
     M5.Display.setCursor(0, MAIN_Y + 95);
     M5.Display.print(";: On   .: Off   ENTER: confirm");
+}
+
+void CardputerDisplay::showPolaritySettingsView(MorseModel& model) {
+    M5.Display.setFont(nullptr);
+    M5.Display.setTextSize(2);
+    M5.Display.setTextColor(COLOR_FG);
+    M5.Display.setCursor(0, MAIN_Y + 4);
+    M5.Display.print("POLARITY");
+
+    M5.Display.setFont(nullptr);
+    M5.Display.setTextSize(3);
+    // Warning colour when Reversed so the non-default orientation is obvious.
+    M5.Display.setTextColor(model.polarityReversed() ? COLOR_WARN : COLOR_ACCENT);
+    M5.Display.setCursor(0, MAIN_Y + 28);
+    M5.Display.print(model.polarityReversed() ? "Reversed" : "Normal");
+
+    M5.Display.setFont(nullptr);
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(0x7384);
+    M5.Display.setCursor(0, MAIN_Y + 95);
+    M5.Display.print(";: Normal  .: Reversed  ENTER: confirm");
 }
 
 // ─── Wi-Fi screens ───────────────────────────────────────────────────────────

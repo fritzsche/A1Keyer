@@ -465,6 +465,139 @@ static void test_keyer_word_space_written_after_7dit_gap() {
     CHECK(foundSpace);
 }
 
+// --- paddle polarity (normal / reversed) ---
+
+// Fill until the first element completes and return the symbol the decoder
+// emitted for it ('.' = dit, '-' = dah, 0 if none).
+static char firstDecodedSymbol(IambicKeyer& keyer, KeyEnvelop& env) {
+    int dahLen = env.envelopeSize(KeyEnvelop::Element::DAH);
+    std::vector<int16_t> buf(dahLen, 0);
+    keyer.fillSamples(buf.data(), dahLen, 500.0f, 16384, 48000);
+    char c = 0;
+    if (!keyer.decoderRead(&c)) return 0;
+    return c;
+}
+
+static void test_keyer_polarity_normal_by_default() {
+    IambicKeyer keyer;
+    CHECK(!keyer.reversed());
+}
+
+static void test_keyer_reversed_dit_paddle_sounds_dah() {
+    KeyEnvelop env(20, 0.005f, 48000);
+    IambicKeyer keyer;
+    keyer.begin(&env);
+    keyer.setReversed(true);   // clears key state, so press afterwards
+    resetKeyState();
+
+    // Press the PHYSICAL dit lever
+    setMemory(IambicKeyer::DIT, SET);
+    setState(IambicKeyer::DIT, UNSET);  // released immediately
+
+    // Reversed → it must sound a DAH
+    CHECK(firstDecodedSymbol(keyer, env) == '-');
+}
+
+static void test_keyer_reversed_dah_paddle_sounds_dit() {
+    KeyEnvelop env(20, 0.005f, 48000);
+    IambicKeyer keyer;
+    keyer.begin(&env);
+    keyer.setReversed(true);
+    resetKeyState();
+
+    // Press the PHYSICAL dah lever
+    setMemory(IambicKeyer::DAH, SET);
+    setState(IambicKeyer::DAH, UNSET);
+
+    // Reversed → it must sound a DIT
+    CHECK(firstDecodedSymbol(keyer, env) == '.');
+}
+
+static void test_keyer_normal_polarity_unchanged() {
+    // Regression guard: an explicit setReversed(false) must behave exactly as
+    // the default path, i.e. the swap is never unconditionally applied.
+    KeyEnvelop env(20, 0.005f, 48000);
+    IambicKeyer keyer;
+    keyer.begin(&env);
+    keyer.setReversed(false);
+    resetKeyState();
+
+    setMemory(IambicKeyer::DIT, SET);
+    setState(IambicKeyer::DIT, UNSET);
+
+    CHECK(firstDecodedSymbol(keyer, env) == '.');
+}
+
+static void test_keyer_reversed_clears_memory_on_physical_index() {
+    // The element-end memory clear must target the PHYSICAL lever that drove
+    // the element, not the element's own index.
+    KeyEnvelop env(20, 0.005f, 48000);
+    IambicKeyer keyer;
+    keyer.begin(&env);
+    keyer.setReversed(true);
+    resetKeyState();
+
+    setMemory(IambicKeyer::DIT, SET);
+    setState(IambicKeyer::DIT, UNSET);  // released → memory must clear at element end
+
+    int dahLen = env.envelopeSize(KeyEnvelop::Element::DAH);
+    std::vector<int16_t> buf(dahLen, 0);
+    keyer.fillSamples(buf.data(), dahLen, 500.0f, 16384, 48000);
+
+    CHECK(getMemory(IambicKeyer::DIT) == UNSET);
+}
+
+static void test_keyer_set_reversed_clears_pending_memory() {
+    // Flipping polarity must drop a press latched under the old orientation,
+    // otherwise it would fire as an element of the wrong length.
+    KeyEnvelop env(20, 0.005f, 48000);
+    IambicKeyer keyer;
+    keyer.begin(&env);
+    resetKeyState();
+
+    setMemory(IambicKeyer::DIT, SET);
+    setState(IambicKeyer::DIT, SET);
+
+    keyer.setReversed(true);
+
+    CHECK(getMemory(IambicKeyer::DIT) == UNSET);
+    CHECK(getMemory(IambicKeyer::DAH) == UNSET);
+    CHECK(keyer.reversed());
+}
+
+static void test_keyer_reversed_iambic_squeeze_alternates() {
+    // Squeeze both levers with polarity reversed: the first element follows the
+    // reversed mapping and iambic alternation still alternates.
+    KeyEnvelop env(20, 0.005f, 48000);
+    IambicKeyer keyer;
+    keyer.begin(&env);
+    keyer.setReversed(true);
+    resetKeyState();
+
+    setMemory(IambicKeyer::DIT, SET);
+    setState(IambicKeyer::DIT, SET);
+    setMemory(IambicKeyer::DAH, SET);
+    setState(IambicKeyer::DAH, SET);
+
+    int dahLen = env.envelopeSize(KeyEnvelop::Element::DAH);
+    int ditLen = env.envelopeSize(KeyEnvelop::Element::DIT);
+    std::vector<int16_t> buf(dahLen + ditLen + dahLen, 0);
+    keyer.fillSamples(buf.data(), buf.size(), 500.0f, 16384, 48000);
+
+    // Collect the element symbols that were produced.
+    std::vector<char> syms;
+    char c;
+    while (keyer.decoderRead(&c)) {
+        if (c == '.' || c == '-') syms.push_back(c);
+    }
+
+    CHECK(syms.size() >= 2);
+    // DIT paddle has priority, and reversed it sounds a DAH first...
+    CHECK(syms[0] == '-');
+    // ...then alternation gives the opposite element.
+    CHECK(syms[1] == '.');
+}
+
 int main() {
     printf("=== test_iambic_keyer ===\n");
     RUN(test_keyer_idle_by_default);
@@ -486,5 +619,12 @@ int main() {
     RUN(test_keyer_dit_is_60ms_at_20wpm);
     RUN(test_keyer_dah_is_180ms_at_20wpm);
     RUN(test_keyer_word_space_written_after_7dit_gap);
+    RUN(test_keyer_polarity_normal_by_default);
+    RUN(test_keyer_reversed_dit_paddle_sounds_dah);
+    RUN(test_keyer_reversed_dah_paddle_sounds_dit);
+    RUN(test_keyer_normal_polarity_unchanged);
+    RUN(test_keyer_reversed_clears_memory_on_physical_index);
+    RUN(test_keyer_set_reversed_clears_pending_memory);
+    RUN(test_keyer_reversed_iambic_squeeze_alternates);
     return test_summary();
 }

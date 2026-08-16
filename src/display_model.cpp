@@ -58,6 +58,21 @@ void MorseModel::setRadioKeyingEnabled(bool enabled) {
     incrementChangeCounter();
 }
 
+bool MorseModel::polarityReversed() const {
+    return _polarityReversed.load(std::memory_order_relaxed);
+}
+
+void MorseModel::setPolarityReversed(bool reversed) {
+    bool prev = _polarityReversed.exchange(reversed, std::memory_order_relaxed);
+    if (prev == reversed) return;
+#ifndef UNIT_TEST
+    // Only the iambic keyer is polarity-aware; the straight key has no dit/dah
+    // levers to swap and is deliberately left alone.
+    if (auto keyer = AudioEngine::keyer()) keyer->setReversed(reversed);
+#endif
+    incrementChangeCounter();
+}
+
 bool MorseModel::winkeyMode() const {
     return _winkeyMode.load(std::memory_order_relaxed);
 }

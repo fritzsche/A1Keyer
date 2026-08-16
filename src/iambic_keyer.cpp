@@ -88,6 +88,31 @@ void IambicKeyer::setWPM(int wpm) {
 }
 
 /**
+ * Set paddle polarity (normal / reversed).
+ *
+ * Only the subscript used to read s_keyState is swapped (see phys()); the
+ * element identity fed to startElement() and written to the decoder is
+ * untouched. The ISRs, the straight keyer and the decoder therefore never see
+ * the swap.
+ *
+ * Paddle memory and state are cleared on an actual change so a press latched
+ * under the previous orientation cannot fire a phantom element of the wrong
+ * length. This mirrors MorseKey::clearMemory(), which is unavailable in host
+ * unit-test builds, so s_keyState is cleared directly here.
+ *
+ * @param reversed true = DIT/DAH swapped, false = normal
+ */
+void IambicKeyer::setReversed(bool reversed) {
+    bool prev = _reversed.exchange(reversed, std::memory_order_relaxed);
+    if (prev == reversed) return;  // no-op: don't disturb a paddle mid-stream
+
+    atomic_store(&s_keyState.memory[DIT_IDX], MEMORY_UNSET);
+    atomic_store(&s_keyState.memory[DAH_IDX], MEMORY_UNSET);
+    atomic_store(&s_keyState.state[DIT_IDX], MEMORY_UNSET);
+    atomic_store(&s_keyState.state[DAH_IDX], MEMORY_UNSET);
+}
+
+/**
  * Begin playing a DIT or DAH element.
  *
  * Resets envelope playback position, clears inter-element silence counter,
@@ -207,12 +232,16 @@ size_t IambicKeyer::fillSamples(int16_t* mono, size_t frames,
             }
 #endif
 
+            // Physical lever priority is preserved when both are latched: the
+            // physical DIT lever wins, and phys() maps it to the element it
+            // drives (identity when normal, swapped when reversed). This makes
+            // the setting behave exactly as if the paddle were rewired.
             if (atomic_load(&s_keyState.memory[DIT_IDX])) {
                 _spaceWrittenInIdle = false;  // reset on new paddle press
-                startElement(DIT_IDX);
+                startElement(phys(DIT_IDX));
             } else if (atomic_load(&s_keyState.memory[DAH_IDX])) {
                 _spaceWrittenInIdle = false;
-                startElement(DAH_IDX);
+                startElement(phys(DAH_IDX));
             } else {
                 for (; frameIdx < frames; ++frameIdx) mono[frameIdx] = 0;
                 _totalSamplesRendered += frames;
@@ -254,13 +283,17 @@ size_t IambicKeyer::fillSamples(int16_t* mono, size_t frames,
 
             int ownIdx = _currentElement;
             int oppIdx = (ownIdx == DIT_IDX) ? DAH_IDX : DIT_IDX;
+            // ownIdx/oppIdx are ELEMENT identities; map to the physical lever
+            // that drives them before touching s_keyState.
+            int ownPhys = phys(ownIdx);
+            int oppPhys = phys(oppIdx);
 
             // Track end of every element — needed for correct word-space detection
             _lastElementEndFrame = _totalSamplesRendered;
             rbWrite(sym);
             // Clear own memory if paddle has been released
-            if (!atomic_load(&s_keyState.state[ownIdx])) {
-                atomic_store(&s_keyState.memory[ownIdx], MEMORY_UNSET);
+            if (!atomic_load(&s_keyState.state[ownPhys])) {
+                atomic_store(&s_keyState.memory[ownPhys], MEMORY_UNSET);
             }
 /*
 #ifndef UNIT_TEST
@@ -285,11 +318,11 @@ size_t IambicKeyer::fillSamples(int16_t* mono, size_t frames,
             _currentElement = IAMBIC_ELEMENT_NONE;
 
             // Iambic B decision — three independent branches:
-            if (atomic_load(&s_keyState.memory[oppIdx])) {
+            if (atomic_load(&s_keyState.memory[oppPhys])) {
                 // SWAP: opposite paddle memory set → play opposite immediately
 //                Log::debug("[KEYER] SWAP -> startElement(%d)", oppIdx);
                 startElement(oppIdx);
-            } else if (atomic_load(&s_keyState.memory[ownIdx])) {
+            } else if (atomic_load(&s_keyState.memory[ownPhys])) {
                 // AUTOREPEAT: same paddle still held → start same element again
              //   Log::debug("[KEYER] AUTOREPEAT -> startElement(%d)", ownIdx);
                 startElement(ownIdx);

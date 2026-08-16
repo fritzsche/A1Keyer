@@ -39,6 +39,7 @@ enum class DisplayScreen {
     MODE_VIEW,   ///< Overlay: large mode readout, auto-returns after OVERLAY_TIMEOUT_MS.
     MODE_SETTINGS, ///< Settings: in-place mode editing with ;/., confirmed with Enter.
     KEYING_SETTINGS,  ///< Settings: in-place on/off radio-keying toggle, ;/., confirmed with Enter.
+    POLARITY_SETTINGS, ///< Settings: in-place paddle-polarity toggle (Normal/Reversed), ;/., confirmed with Enter.
     WIFI_SCAN_LIST,   ///< Network config: scan list / "Scanning…" / scan failed message.
     WIFI_PASSWORD_INPUT, ///< Network config: passphrase entry (TextInput-backed).
     WIFI_NETWORK_INFO,   ///< Network config: status, SSID, IP / error, X to forget, R to retry.
@@ -151,6 +152,29 @@ public:
      * Persisted to NVS by main.cpp on Enter from KEYING_SETTINGS.
      */
     void setRadioKeyingEnabled(bool enabled);
+
+    // ─── Paddle polarity ──────────────────────────────────────────────────────
+
+    /**
+     * polarityReversed — whether the iambic paddle levers are swapped.
+     *
+     * When true, the physical dit lever sounds a dah and vice versa, exactly as
+     * if the paddle cable had been rewired. Affects ONLY the iambic keyer — the
+     * straight key is unaffected.
+     *
+     * @return true if polarity is reversed; default false (normal).
+     */
+    bool polarityReversed() const;
+
+    /**
+     * setPolarityReversed — swap or unswap the iambic paddle levers.
+     *
+     * Applied to the running keyer immediately (audible on the next element),
+     * and persisted to NVS by main.cpp on Enter from POLARITY_SETTINGS.
+     *
+     * @param reversed  true to swap dit/dah, false for normal orientation.
+     */
+    void setPolarityReversed(bool reversed);
 
     // ─── WinKey / Console mode indicator ───────────────────────────────────
 
@@ -664,6 +688,9 @@ private:
 
     // Radio keying output (default OFF for safety — must be user-enabled)
     std::atomic<bool> _radioKeyingEnabled{false};
+
+    // Iambic paddle polarity (default false = Normal orientation)
+    std::atomic<bool> _polarityReversed{false};
 
     // WinKey/Console mode indicator (default true = WinKey mode so the
     // device starts speaking the WK2 protocol to a host logger on cold

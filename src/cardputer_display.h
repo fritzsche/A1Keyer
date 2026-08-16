@@ -274,6 +274,17 @@ public:
     void showKeyingSettingsView(MorseModel& model) override;
 
     /**
+     * showPolaritySettingsView — Paddle polarity settings (Normal/Reversed).
+     *
+     * Shows: "POLARITY" label (2x), large current value (3x), hint row.
+     * Adjusted with ; (Normal) / . (Reversed). Confirmed with Enter.
+     * 10s inactivity timeout is handled by DisplayTask via OVERLAY_TIMEOUT_MS.
+     *
+     * @param model  MorseModel reference.
+     */
+    void showPolaritySettingsView(MorseModel& model) override;
+
+    /**
      * showWifiScanList — render the scan list / "Scanning…" / scan-failed screen.
      *
      * Body is a four-row windowed list with a scrollbar thumb on the right

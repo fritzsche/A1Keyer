@@ -108,6 +108,27 @@ public:
     void setWPM(int wpm);
 
     /**
+     * Set paddle polarity.
+     *
+     * When reversed, the physical DIT lever sounds a DAH and vice versa. Only
+     * the subscript used to read s_keyState is swapped — element identity (what
+     * startElement() sounds and what symbol reaches the decoder) is unchanged,
+     * so the swap is confined to this class and never reaches the ISRs, the
+     * straight keyer, or the decoder.
+     *
+     * Safe to call from the UI task while audio is active. Clears paddle memory
+     * so a press latched under the old orientation cannot fire a phantom element.
+     *
+     * @param reversed true = DIT/DAH swapped, false = normal (default)
+     */
+    void setReversed(bool reversed);
+
+    /**
+     * @return true when paddle polarity is reversed.
+     */
+    bool reversed() const { return _reversed.load(std::memory_order_relaxed); }
+
+    /**
      * Fill a mono sample buffer with CW audio for iambic keyer.
      *
      * Call this when s_keyState.memory[DIT/DAH] indicates paddle activity.
@@ -194,6 +215,22 @@ private:
     void startElement(int idx);
 
     /**
+     * Map an element index (DIT_IDX/DAH_IDX — "which element to sound") to the
+     * physical s_keyState index ("which lever the ISR wrote"). Identity when
+     * polarity is normal, swapped when reversed.
+     *
+     * Use this for every s_keyState.memory[]/state[] subscript in this class.
+     * Do NOT use it to pick a GPIO pin for validation against s_keyState — both
+     * sides of that comparison are already physical.
+     *
+     * @param elementIdx DIT_IDX (0) or DAH_IDX (1)
+     * @return Physical paddle index into s_keyState
+     */
+    inline int phys(int elementIdx) const {
+        return _reversed.load(std::memory_order_relaxed) ? (elementIdx ^ 1) : elementIdx;
+    }
+
+    /**
      * Write a symbol to the decoder ring buffer (producer side).
      * Called by fillSamples at element boundaries and when word-space is detected.
      * @param c Symbol: '.', '-', '*', or ' '
@@ -232,6 +269,9 @@ private:
     int _wpm = 20;
     uint32_t _envVersion = 0;
     uint32_t _lastEnvVersion = 0;
+
+    // Paddle polarity. Written by the UI task, read by the audio task.
+    std::atomic<bool> _reversed{false};
 
     // Timing
     uint64_t _totalSamplesRendered = 0;
