@@ -372,3 +372,67 @@ void MorseModel::wifiResetUIState() {
     setWifiScanTop(0);
     wifiClearPassword();
 }
+
+// ─── Memory-keyer accessors ──────────────────────────────────────────────────
+//
+// The TextInput editor is bound to a separate buffer (_memoryEditorBuf),
+// NOT to _memory[slot]. This mirrors the wifi password buffer pattern:
+// edits live in their own storage and are written to the slot on commit
+// (Enter). Pressing ESC discards whatever is in the editor and leaves
+// the persisted text untouched. Persistence to NVS happens in main.cpp's
+// setup() (load) and on Enter from MEMORY_EDIT (save).
+
+TextInput* MorseModel::memoryInput() {
+    if (!_memoryInput) {
+        _memoryInput = new TextInput(_memoryEditorBuf, kMemLen, '*');
+    }
+    return _memoryInput;
+}
+
+void MorseModel::memoryClearEditor() {
+    if (_memoryInput) _memoryInput->clear();
+    else {
+        int slot = _memoryEditingSlot.load(std::memory_order_acquire);
+        if (slot >= 0 && slot < static_cast<int>(kMemSlots)) {
+            _memory[slot][0] = '\0';
+        }
+    }
+}
+
+int MorseModel::memoryEditingSlot() const {
+    return _memoryEditingSlot.load(std::memory_order_acquire);
+}
+
+void MorseModel::setMemoryEditingSlot(int slot) {
+    if (slot < -1 || slot >= static_cast<int>(kMemSlots)) return;
+    _memoryEditingSlot.store(slot, std::memory_order_release);
+    incrementChangeCounter();
+}
+
+int MorseModel::memoryPickSlot() const {
+    return _memoryPickSlot.load(std::memory_order_acquire);
+}
+
+void MorseModel::setMemoryPickSlot(int slot) {
+    if (slot < -1 || slot >= static_cast<int>(kMemSlots)) return;
+    _memoryPickSlot.store(slot, std::memory_order_release);
+    incrementChangeCounter();
+}
+
+const char* MorseModel::getMemory(uint8_t slot) const {
+    if (slot >= kMemSlots) return "";
+    return _memory[slot];
+}
+
+void MorseModel::setMemory(uint8_t slot, const char* text) {
+    if (slot >= kMemSlots) return;
+    memCopyStr(_memory[slot], kMemLen, text);
+    incrementChangeCounter();
+}
+
+void MorseModel::copyMemoryBank(const MemoryBank& bank) {
+    for (uint8_t i = 0; i < kMemSlots; ++i) {
+        memCopyStr(_memory[i], kMemLen, bank.slot[i]);
+    }
+    incrementChangeCounter();
+}

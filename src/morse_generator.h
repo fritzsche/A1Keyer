@@ -148,6 +148,16 @@ private:
     bool   _wasPlaying = false;
     bool   _endedWithBoundarySilence = false;
 
+    // Edge-detect state for the KeyEventBus bridge: tracks the
+    // previous element's key-down flag so advanceToNextElement can
+    // fire keyDown() on a 0→1 transition and keyUp() on a 1→0.
+    // Not atomic: only one core advances the generator at a time —
+    // playText() does its single advance on Core 0 before publishing
+    // _state = PLAYING, and from then on only fillSamplesMono() (Core 1)
+    // drives advanceToNextElement. See morse_generator.cpp § Cross-
+    // core invariant in the wiring block.
+    bool   _wasElKeyDown = false;
+
     // Sine phase for tone generation
     float  _phase = 0.0f;
     float  _phaseInc = 0.0f;

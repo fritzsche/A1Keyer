@@ -82,6 +82,17 @@ public:
      */
     void primeEnterHeld();
 
+    /**
+     * Tell the editor that a printable character is already "in flight"
+     * — the key that selected this slot (or any other printable) is
+     * still being held when feed() first sees it. Used by screens that
+     * transition into the editor on a key press (e.g. the memory
+     * picker's digit handler): without this prime, the still-held
+     * digit would type itself into the freshly-prefilled buffer on the
+     * next tick, since setValue() resets _prevPrintable to 0.
+     */
+    void primePrintableHeld(char c);
+
     // ─── Buffer access ──────────────────────────────────────────────────
 
     const char* value()  const { return _buf; }

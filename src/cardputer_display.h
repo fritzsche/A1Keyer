@@ -305,6 +305,30 @@ public:
      */
     void showWifiNetworkInfo(MorseModel& model) override;
 
+    /**
+     * showMemoryPick — slot picker overlay for the memory keyer.
+     *
+     * Two-column layout (5 rows of 2 slots) listing slot 0..9 with a
+     * small preview of the stored text (or "(empty)" in dim grey).
+     * Picker cursor is highlighted in the accent color so the operator
+     * can tell which digit they will pick next; the renderer always
+     * highlights the cursor even though this screen has no keyboard
+     * cursor of its own yet — the digit IS the cursor.
+     */
+    void showMemoryPick(MorseModel& model) override;
+
+    /**
+     * showMemoryEdit — slot editor overlay for the memory keyer.
+     *
+     * Layout modeled on showWifiPasswordInput: "Mem N" title in accent
+     * with a size-1 suffix showing the current character count, a
+     * masked/revealed input box, a static caret at the cursor column,
+     * and the same hint row used by the Wi-Fi password screen.
+     *
+     * @param model  MorseModel reference.
+     */
+    void showMemoryEdit(MorseModel& model) override;
+
     // ─── Screen-saver control ────────────────────────────────────────────────
 
     /**

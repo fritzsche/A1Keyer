@@ -37,6 +37,18 @@ public:
     /// builds.
     static void syncWpmFromLocal();
 
+    /// Memory-keyer entry point. Plays a stored CW phrase through
+    /// sidetone AND the radio-keying bus (KeyEventBus, gated by the
+    /// operator's KEYING setting inside RadioKeyer). When the
+    /// WinKey bridge is open (a host logger is connected), the bytes
+    /// are also fed through `feed()`+`poll()` so the host sees the
+    /// standard per-byte K1EL echo — same code path as host-driven
+    /// playback. No-op (early return) for null/empty text, when the
+    /// generator is already busy, or in UNIT_TEST builds.
+    ///
+    /// See docs/memory.md and docs/winkey.md.
+    static void playLocalMemoryText(const char* text);
+
 private:
     Winkey() = delete;
 };

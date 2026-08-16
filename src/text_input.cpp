@@ -37,6 +37,14 @@ void TextInput::primeEnterHeld() {
     _prevEnter = true;
 }
 
+void TextInput::primePrintableHeld(char c) {
+    // Pretend the previous tick already saw `c` held. The next feed()
+    // will see charEdge = (ks.printable != 0) && (ks.printable != c)
+    // — false while the same key remains down, true as soon as the
+    // user presses a different key (which is the desired behaviour).
+    _prevPrintable = c;
+}
+
 void TextInput::insert(char c) {
     if (!isPrintable(c)) return;
     // Buffer is "full" when one more char plus the terminator won't fit.

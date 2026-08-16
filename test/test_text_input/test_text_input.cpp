@@ -387,6 +387,55 @@ static void test_prime_enter_held_suppresses_first_tick() {
     CHECK(ti.feed(ks) == TextInput::Result::ENTER);
 }
 
+// primePrintableHeld: when the user pressed a printable key to enter
+// this screen (the memory picker's digit handler is the canonical
+// case — pressing M then 2 transitions into MEMORY_EDIT), the still-
+// held digit must NOT type itself into the freshly-prefilled buffer on
+// the next loop tick. setValue() resets _prevPrintable to 0, so without
+// priming the editor's first feed() sees a fresh edge on the same key
+// the user is still holding.
+static void test_prime_printable_held_suppresses_first_tick() {
+    char buf[16];
+    TextInput ti(buf, sizeof(buf));
+
+    // Simulate the memory-picker path: setValue() (which resets
+    // _prevPrintable to 0), then primePrintableHeld('2') to swallow
+    // the held '2'.
+    ti.setValue("CQ TEST DE");
+    ti.primePrintableHeld('2');
+
+    CardputerKeyState ks;
+    ks.anyKey    = true;
+    ks.printable = '2';     // user is still holding '2'
+    CHECK(ti.feed(ks) == TextInput::Result::IDLE);   // not CHANGED
+    CHECK_STR_EQ("CQ TEST DE", ti.value());
+
+    // Once '2' is released and pressed again, normal insert semantics
+    // are restored — the user can now type '2' into the buffer.
+    ti.feed(none());
+    CHECK(ti.feed(chr('2', false)) == TextInput::Result::CHANGED);
+    CHECK_STR_EQ("CQ TEST DE2", ti.value());
+}
+
+// primePrintableHeld must not swallow a DIFFERENT key pressed while
+// the primed key is still held — the prime only suppresses the same
+// character. If the user holds '2' through the transition but then
+// (on the next tick) presses '5' instead of releasing first, the '5'
+// is a fresh edge and must insert.
+static void test_prime_printable_held_does_not_swallow_other_key() {
+    char buf[16];
+    TextInput ti(buf, sizeof(buf));
+
+    ti.setValue("");
+    ti.primePrintableHeld('2');
+
+    CardputerKeyState ks;
+    ks.anyKey    = true;
+    ks.printable = '5';     // different char, still held — fresh edge
+    CHECK(ti.feed(ks) == TextInput::Result::CHANGED);
+    CHECK_STR_EQ("5", ti.value());
+}
+
 static void test_escape_takes_precedence_over_enter() {
     char buf[16];
     TextInput ti(buf, sizeof(buf));
@@ -567,6 +616,8 @@ int main() {
     RUN(test_feed_escape_returns_esc);
     RUN(test_held_enter_fires_once);
     RUN(test_prime_enter_held_suppresses_first_tick);
+    RUN(test_prime_printable_held_suppresses_first_tick);
+    RUN(test_prime_printable_held_does_not_swallow_other_key);
     RUN(test_escape_takes_precedence_over_enter);
 
     RUN(test_shift_space_toggles_reveal);

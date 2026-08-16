@@ -21,6 +21,7 @@
 #include <cstdint>
 
 #include "net_config.h"
+#include "memory_store.h"
 
 class TextInput;   // forward: passwordInput() returns TextInput*
 
@@ -40,7 +41,10 @@ enum class DisplayScreen {
     KEYING_SETTINGS,  ///< Settings: in-place on/off radio-keying toggle, ;/., confirmed with Enter.
     WIFI_SCAN_LIST,   ///< Network config: scan list / "Scanning…" / scan failed message.
     WIFI_PASSWORD_INPUT, ///< Network config: passphrase entry (TextInput-backed).
-    WIFI_NETWORK_INFO   ///< Network config: status, SSID, IP / error, X to forget, R to retry.
+    WIFI_NETWORK_INFO,   ///< Network config: status, SSID, IP / error, X to forget, R to retry.
+
+    MEMORY_PICK,         ///< Memory keyer: M opened, awaiting digit 0-9 to choose the slot to edit.
+    MEMORY_EDIT          ///< Memory keyer: slot picked, editing CW text via TextInput (same control as the Wi-Fi password screen).
 };
 
 /** Keyer operating mode. */
@@ -569,6 +573,64 @@ public:
     /// enter to DECODER so a re-entrant scan starts fresh).
     void wifiResetUIState();
 
+    // ─── Memory-keyer state ─────────────────────────────────────────────────
+    //
+    // Ten CW memory slots, addressed by the digits '0'..'9'. The buffers
+    // live inside the model so they survive across visits to MEMORY_PICK
+    // and MEMORY_EDIT, mirroring the password-buffer layout used by the
+    // Wi-Fi password screen.
+
+    /// Number of memory slots, addressed by keyboard digits '0'..'9'.
+    static constexpr uint8_t kMemSlots = ::kMemSlots;
+
+    /// Maximum length of one slot's CW text (includes the terminator).
+    /// See memory_store.h for the source of truth.
+    static constexpr size_t kMemLen = ::kMemLen;
+
+    /**
+     * memoryInput — single-line editor for the currently selected slot.
+     *
+     * @return The lazily-constructed TextInput. Buffer is caller-owned
+     *         (lives at _memory[slot]) so the model needs to be told
+     *         which slot to back the editor on — call setMemoryEditingSlot
+     *         BEFORE first use. The renderer reads the same buffer via
+     *         getMemory(). see text_input.h.
+     */
+    TextInput* memoryInput();
+
+    /// Clear the memory editor's buffer. Safe to call before construction.
+    void memoryClearEditor();
+
+    /// Slot the editor is currently bound to: -1 = none (idle), 0..9 = editing.
+    int memoryEditingSlot() const;
+
+    /// Set the slot the editor is bound to. The renderer and playback
+    /// paths read this to know which row of _memory to use.
+    void setMemoryEditingSlot(int slot);
+
+    /// Slot the picker screen has currently armed: -1 = none, 0..9 = armed.
+    /// Used by the picker digit handler so a stray ESC clears the state.
+    int memoryPickSlot() const;
+
+    /// Set the picker armed slot.
+    void setMemoryPickSlot(int slot);
+
+    /// Pointer to the stored text for a slot, never nullptr (an unset
+    /// slot returns the empty string). The buffer is owned by the model
+    /// and is the SAME buffer the editor writes into during MEMORY_EDIT,
+    /// so committing via TextInput::setValue followed by reading via
+    /// getMemory works as expected without copying.
+    const char* getMemory(uint8_t slot) const;
+
+    /// Copy `text` into the row at `slot`, truncating if necessary and
+    /// always NUL-terminating. Does NOT persist to NVS — that happens
+    /// in setup() and on Enter from MEMORY_EDIT.
+    void setMemory(uint8_t slot, const char* text);
+
+    /// Convenience: copy the entire bank in/out of the model's rows.
+    /// Used by setup() (load) and on Enter (save).
+    void copyMemoryBank(const MemoryBank& bank);
+
     // ─── Private members ──────────────────────────────────────────────────────
 
 private:
@@ -639,6 +701,19 @@ private:
 
     char       _passwordBuf[kPassBufLen] = {0};
     TextInput* _passwordInput = nullptr;   ///< lazy; constructed in passwordInput()
+
+    // ─── Memory-keyer storage ────────────────────────────────────────────────
+    char       _memory[kMemSlots][kMemLen] = {{0}};
+    // Editor buffer is independent of _memory[slot] — the slot is only
+    // updated when the operator presses Enter (commit) inside MEMORY_EDIT.
+    // Pressing ESC discards whatever is in the editor, leaving the
+    // persisted text untouched. Mirrors the password buffer pattern:
+    // edits live in their own storage and are written to the model on
+    // commit, so ESC is a true cancel.
+    char       _memoryEditorBuf[kMemLen] = {0};
+    TextInput* _memoryInput   = nullptr;   ///< lazy; constructed in memoryInput(), bound to _memoryEditorBuf
+    std::atomic<int> _memoryEditingSlot{-1};
+    std::atomic<int> _memoryPickSlot{-1};
 
     // Increment on ANY state change — display task re-renders when this changes
     std::atomic<uint32_t> _changeCounter{0};

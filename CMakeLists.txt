@@ -27,8 +27,10 @@ set(LIB_SOURCES
     src/key_event_bus.cpp
     src/radio_keyer.cpp
     src/winkey_bridge.cpp
+    src/winkey.cpp
     src/text_input.cpp
     src/net_config.cpp
+    src/memory_store.cpp
     src/network_manager.cpp
 )
 
@@ -49,6 +51,9 @@ foreach(SUITE IN ITEMS
     test_winkey_bridge
     test_text_input
     test_net_config
+    test_memory_store
+    test_morse_generator_bus
+    test_winkey_playback
     test_network_manager
 )
     add_executable(${SUITE}

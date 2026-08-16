@@ -26,6 +26,7 @@
 #include "console_io.h"
 #include "network_manager.h"
 #include "text_input.h"
+#include "memory_store.h"
 #if ENABLE_WIFI_DEBUG
 #include <WiFi.h>
 #include "wifi_debug.h"
@@ -314,6 +315,170 @@ static void mirrorWifiState(MorseModel& model) {
 }
 
 // ---------------------------------------------------------------------------
+// handleMemoryScreen — per-screen keyboard routing for MEMORY_PICK and
+// MEMORY_EDIT.
+//
+// Called from handleKeyboard() AFTER the global W/F/V/M/K/D/C/N handlers
+// but BEFORE the universal Enter-dismisses-overlay block — MEMORY_PICK
+// and MEMORY_EDIT are exempt from the universal block (see onMemoryScreen
+// at the bottom of handleKeyboard), so the Enter pressed inside the editor
+// reaches TextInput::feed() and fires its ENTER result.
+//
+// Picker (MEMORY_PICK): accept a single digit 0-9 → transition to the
+// editor pre-filled with the slot's persisted text. ESC → DECODER.
+//
+// Editor (MEMORY_EDIT): OPT caps lock (mirrors the wifi password screen),
+// ',' / '/' cursor nav (mirrors the wifi password screen), ENTER commits
+// the buffer to the slot AND saves the bank to NVS, ESC discards. A digit
+// 0-9 inside the editor pivots to a different slot — useful when the
+// operator opened memory 3 then realised they meant memory 5.
+// ---------------------------------------------------------------------------
+static void handleMemoryScreen(MorseModel& model, const CardputerKeyState& ks) {
+    const DisplayScreen sc = model.screen();
+
+    // Keep the overlay alive while the operator types — otherwise
+    // OVERLAY_TIMEOUT_MS would auto-dismiss the screen back to DECODER
+    // mid-edit (same responsibility as handleWifiScreen for the wifi
+    // screens).
+    model.setOverlayStartMillis(millis());
+
+    static DisplayScreen s_lastSc = DisplayScreen::DECODER;
+    const bool screenJustChanged = (sc != s_lastSc);
+    s_lastSc = sc;
+
+    if (sc == DisplayScreen::MEMORY_PICK) {
+        // Track each digit 0-9 separately so the picker can fire on a
+        // rising edge of any one of them. A fresh screen primes the
+        // digits to the current key state so a key the operator is
+        // still holding across a screen change (rare, but possible
+        // coming back from MEMORY_EDIT via ESC) is not double-counted.
+        static bool wasDigit[10] = {false,false,false,false,false,
+                                    false,false,false,false,false};
+        static bool wasEsc = false;
+
+        int digit = -1;
+        if (ks.printable >= '0' && ks.printable <= '9') digit = ks.printable - '0';
+
+        if (screenJustChanged) {
+            for (int i = 0; i < 10; ++i) wasDigit[i] = (i == digit);
+            wasEsc = ks.escape;
+        }
+
+        if (digit >= 0 && !wasDigit[digit]) {
+            // Pick slot → transition to the editor pre-filled with the
+            // slot's persisted text. setMemoryEditingSlot re-binds the
+            // TextInput lazily in memoryInput(); setValue overwrites the
+            // (initially empty) editor buffer with the saved CW text so
+            // the operator can edit in place rather than starting from
+            // scratch.
+            //
+            // CRITICAL: primePrintableHeld prevents the still-held digit
+            // from typing itself into the buffer on the very next tick.
+            // setValue() resets _prevPrintable to 0, so without priming
+            // the editor's first feed() sees a fresh "edge" on the same
+            // '2' the user is still holding — the bug the operator
+            // observed where pressing M then 2 prefilled the field with
+            // "2". Mirrors primeEnterHeld() in the wifi password screen.
+            model.setMemoryEditingSlot(digit);
+            TextInput* ti = model.memoryInput();
+            ti->setValue(model.getMemory((uint8_t)digit));
+            ti->primePrintableHeld(ks.printable);
+            model.setScreen(DisplayScreen::MEMORY_EDIT);
+            DisplayTask::requestRender();
+        }
+
+        if (ks.escape && !wasEsc) {
+            model.setScreen(DisplayScreen::DECODER);
+            DisplayTask::requestRender();
+        }
+
+        for (int i = 0; i < 10; ++i) wasDigit[i] = (i == digit);
+        wasEsc = ks.escape;
+        return;
+    }
+
+    if (sc == DisplayScreen::MEMORY_EDIT) {
+        // OPT → caps lock. Same wiring as WIFI_PASSWORD_INPUT — see the
+        // comment block at main.cpp:171-180.
+        static bool wasOpt = false;
+        if (screenJustChanged) {
+            wasOpt = ks.opt;
+        }
+        const bool optEdge = ks.opt && !wasOpt;
+        wasOpt = ks.opt;
+        if (optEdge) {
+#ifdef BOARD_CARDPUTER
+            M5Cardputer.Keyboard.setCapsLocked(
+                !M5Cardputer.Keyboard.capslocked());
+#endif
+            DisplayTask::requestRender();
+        }
+
+        // Digits 0-9 are typed as text — no slot pivot inside the
+        // editor. CW macros routinely contain numbers ("5NN", "599",
+        // contest exchanges) and an accidental pivot would have
+        // overwritten the operator's in-progress edits. To switch
+        // slots, ESC back to MEMORY_PICK and press a different digit.
+
+        // ',' / '/' → cursor nav (mirror wifi password handler at
+        // main.cpp:201-220).
+        static bool wasComma = false, wasSlash = false;
+        TextInput* ti = model.memoryInput();
+        const bool comma = ks.printable == ',';
+        const bool slash = ks.printable == '/';
+        if (screenJustChanged) {
+            wasComma = comma; wasSlash = slash;
+        }
+        bool cursorMoved = false;
+        if (comma && !wasComma) { ti->moveCursor(-1); cursorMoved = true; }
+        if (slash && !wasSlash) { ti->moveCursor(+1); cursorMoved = true; }
+        wasComma = comma;
+        wasSlash = slash;
+
+        CardputerKeyState ksForEditor = ks;
+        if (cursorMoved) ksForEditor.printable = 0;
+
+        const TextInput::Result r = ti->feed(ksForEditor);
+        if (r == TextInput::Result::ENTER) {
+            // Commit: copy the editor buffer into the slot, then save
+            // the whole bank to NVS. Saving all 10 slots on every commit
+            // is fine — Preferences.putString() is a no-op when the
+            // value is unchanged, so rows we didn't touch cost nothing.
+            const int slot = model.memoryEditingSlot();
+            if (slot >= 0 && slot < (int)kMemSlots) {
+                const char* newText = ti->value();
+                model.setMemory((uint8_t)slot, newText);
+                MemoryBank bank;
+                for (uint8_t i = 0; i < kMemSlots; ++i) {
+                    memCopyStr(bank.slot[i], kMemLen, model.getMemory(i));
+                }
+                if (memoryBankSave(bank)) {
+                    Log::info("[MEM] saved m%d=\"%s\"", slot, newText);
+                } else {
+                    Log::error("[MEM] save FAILED for slot %d", slot);
+                }
+            }
+            model.setMemoryEditingSlot(-1);
+            model.setMemoryPickSlot(-1);
+            model.setScreen(DisplayScreen::DECODER);
+            DisplayTask::requestRender();
+        } else if (r == TextInput::Result::ESC) {
+            // Discard: editor buffer is dropped automatically (the
+            // TextInput stays bound to it; the next visit will
+            // setValue() over it). The persisted slot text is
+            // unchanged.
+            model.setMemoryEditingSlot(-1);
+            model.setMemoryPickSlot(-1);
+            model.setScreen(DisplayScreen::DECODER);
+            DisplayTask::requestRender();
+        } else if (cursorMoved || r == TextInput::Result::CHANGED) {
+            DisplayTask::requestRender();
+        }
+        return;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Keyboard handling — drives MorseModel state
 // ---------------------------------------------------------------------------
 static void handleKeyboard() {
@@ -424,16 +589,21 @@ static void handleKeyboard() {
         DisplayTask::requestRender();
     }
 
-    // M → mode settings (toggle: Paddle / Straight). Same gate as W.
+    // M → memory-keyer picker (open from DECODER). The two-key
+    // editing gesture (M + 0-9) reuses the M key that previously
+    // toggled MODE_SETTINGS — paddle-vs-straight still lives behind
+    // MODE_SETTINGS, but is no longer reachable from the keyboard.
+    // (A future gesture can revive it if needed; the screen enum and
+    // renderer are kept so the state machine stays self-consistent.)
     if (mKey && !wasM &&
         sc != DisplayScreen::WIFI_PASSWORD_INPUT &&
-        (sc == DisplayScreen::DECODER || sc == DisplayScreen::MODE_SETTINGS)) {
-        if (sc == DisplayScreen::MODE_SETTINGS) {
-            model.setScreen(DisplayScreen::DECODER);
-        } else {
-            model.setScreen(DisplayScreen::MODE_SETTINGS);
-            model.setOverlayStartMillis(millis());
-        }
+        sc != DisplayScreen::MEMORY_PICK &&
+        sc != DisplayScreen::MEMORY_EDIT &&
+        sc == DisplayScreen::DECODER) {
+        Log::write("[KB] M pressed → MEMORY_PICK\n");
+        model.setMemoryPickSlot(-1);
+        model.setScreen(DisplayScreen::MEMORY_PICK);
+        model.setOverlayStartMillis(millis());
         DisplayTask::requestRender();
     }
 
@@ -496,8 +666,16 @@ static void handleKeyboard() {
         DisplayTask::requestRender();
     }
 
-    // P → start Morse encoder playback.
-    if (pKey && !wasP) {
+    // P → start Morse encoder playback. Suppressed while a memory
+    // input field has focus — typing P as part of a contest macro
+    // ("TEST DE W1AW POTA K") would otherwise fire "Hello Morse!"
+    // mid-edit and clobber the operator's typed text. The release
+    // branch below is unaffected: it only fires when mode is already
+    // ENCODER, which can only be true if a press actually started
+    // playback on a non-memory screen.
+    if (pKey && !wasP &&
+        sc != DisplayScreen::MEMORY_PICK &&
+        sc != DisplayScreen::MEMORY_EDIT) {
         auto gen = AudioEngine::morseGen();
         if (gen && !gen->isPlaying()) {
             gen->playText("Hello Morse!");
@@ -571,6 +749,35 @@ static void handleKeyboard() {
              model.screen() == DisplayScreen::WIFI_NETWORK_INFO) {
         handleWifiScreen(model, pollKeys());
     }
+    // Memory-keyer screens: dedicated handlers. Same pattern as Wi-Fi.
+    else if (model.screen() == DisplayScreen::MEMORY_PICK ||
+             model.screen() == DisplayScreen::MEMORY_EDIT) {
+        handleMemoryScreen(model, pollKeys());
+    }
+    // DECODER: plain-digit playback. The digits 0-9 each map to a memory
+    // slot; pressing one plays the slot's text through the sidetone, the
+    // WinKeyer bridge (if a host is attached), and the radio keying
+    // output (when KEYING is enabled). Edge-detected so holding a digit
+    // does not spam playback.
+    else if (model.screen() == DisplayScreen::DECODER) {
+        static int s_lastDigit = -1;
+        const CardputerKeyState pk = pollKeys();
+        int digit = -1;
+        if (pk.printable >= '0' && pk.printable <= '9') {
+            digit = pk.printable - '0';
+        }
+        if (digit >= 0 && digit != s_lastDigit) {
+            const char* text = model.getMemory((uint8_t)digit);
+            if (text && text[0] != '\0') {
+                // Only call the playback method when there is actually
+                // something to play — pressing an unset slot is a
+                // silent no-op rather than an error beep.
+                Winkey::playLocalMemoryText(text);
+                DisplayTask::requestRender();
+            }
+        }
+        s_lastDigit = digit;
+    }
 
     // K hold-to-key (only when keying is enabled and we are NOT inside
     // the KEYING_SETTINGS overlay, and not suppressed by a recent
@@ -598,15 +805,19 @@ static void handleKeyboard() {
     if (!kKey) suppressKUntilRelease = false;
 
     // Enter: dismiss overlay and return to DECODER. Save settings if in settings screens.
-    // The three wifi screens are exempt — handleWifiScreen() above already
-    // gave Enter its meaning for them (select a network, commit a password,
-    // return to the scan list), and the screen it transitioned to would be
-    // immediately stomped back to DECODER otherwise.
+    // The three wifi screens AND the two memory-keyer screens are exempt —
+    // handleWifiScreen() / handleMemoryScreen() already gave Enter its
+    // meaning for them (select a network, commit a password, pick a slot,
+    // commit an edited memory), and the screen they transitioned to would
+    // be immediately stomped back to DECODER otherwise.
     const bool onWifiScreen =
         model.screen() == DisplayScreen::WIFI_SCAN_LIST ||
         model.screen() == DisplayScreen::WIFI_PASSWORD_INPUT ||
         model.screen() == DisplayScreen::WIFI_NETWORK_INFO;
-    if (enter && !wasEnter && !onWifiScreen) {
+    const bool onMemoryScreen =
+        model.screen() == DisplayScreen::MEMORY_PICK ||
+        model.screen() == DisplayScreen::MEMORY_EDIT;
+    if (enter && !wasEnter && !onWifiScreen && !onMemoryScreen) {
         if (model.screen() == DisplayScreen::WPM_SETTINGS) {
             Preferences prefs;
             prefs.begin("morse", false);  // read-write
@@ -752,6 +963,23 @@ void setup() {
         model.setRadioKeyingEnabled(savedKeying);
         Log::write("[setup] loaded WPM=%d freq=%d vol=%d keytype=%s keying=%d from preferences\n",
             savedWpm, savedFreq, savedVol, savedKeyType.c_str(), savedKeying ? 1 : 0);
+    }
+
+    // Memory-keyer bank — separate NVS namespace ("memory") so clearing
+    // the device settings (the "morse" namespace above) does not wipe
+    // the operator's stored CQ/contest exchanges. Loaded into MorseModel
+    // once at startup; per-commit saves happen on Enter from MEMORY_EDIT
+    // (see handleMemoryScreen()).
+    {
+        MemoryBank bank;
+        memoryBankLoad(bank);
+        MorseModel::instance().copyMemoryBank(bank);
+        int populated = 0;
+        for (uint8_t i = 0; i < kMemSlots; ++i) {
+            if (bank.slot[i][0] != '\0') ++populated;
+        }
+        Log::info("[setup] loaded memory bank: %d/%d slots populated",
+            populated, (int)kMemSlots);
     }
 
     Log::info("A1Keyer v%s", A1KEYER_VERSION);

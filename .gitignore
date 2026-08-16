@@ -2,6 +2,7 @@
 .pio
 .vscode/
 tmp
+tmp1
 # CMake build output
 build/
 CMakeCache.txt

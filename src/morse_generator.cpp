@@ -1,6 +1,7 @@
 #include "morse_generator.h"
 #include "display_model.h"
 #include "display_task.h"
+#include "key_event_bus.h"
 #include "Log.h"
 #ifndef UNIT_TEST
 #include <Arduino.h>
@@ -9,16 +10,34 @@
 #endif
 #include <cmath>
 #include <cstring>
-// NOTE: MorseGenerator (player, e.g. P-key "Hello Morse!" playback) is
-// intentionally NOT wired to KeyEventBus in this change. The future
-// Winkey-compatible player will emit KeyEventBus::keyDown() / keyUp()
-// here at every dit/dah boundary so on-air transmissions can be
-// triggered by stored text. See docs/keyer.md §"Behavior".
+// MorseGenerator drives the audio pipeline (sidetone) AND is the
+// on-air keying source for stored-text playback (P-key "Hello Morse!"
+// from main.cpp, WinKey-emulated host playback from WinkeyBridge, and
+// the memory-keyer feature). The edge-detect block below in
+// advanceToNextElement() fires KeyEventBus::keyDown() / keyUp() at
+// every dit/dah boundary so on-air transmission happens through the
+// same central dispatcher that the paddle, straight key, and held-K
+// use. The actual radio GPIO is gated inside RadioKeyer by its own
+// _enabled flag, so the operator's KEYING setting remains the
+// authoritative on/off for RF output. See docs/keyer.md §"Behavior".
 //
-// The screensaver-wake-up signal (`DisplayTask::wakeFromScreensaver()`)
-// IS bumped on every key-down element below so the screen unblanks
-// during stored-text or WinKey-emulation playback — the same way the
-// paddle ISR bumps it for manual keying. See docs/winkey.md § 16.9.
+// Screensaver-wake-up (`DisplayTask::wakeFromScreensaver()`) is
+// bumped on every key-down element so the screen unblanks during
+// stored-text and WinKey playback — the same way the paddle ISR
+// bumps it for manual keying. See docs/winkey.md § 16.9.
+//
+// ─── Cross-core invariant ────────────────────────────────────────────────
+// advanceToNextElement() is called from BOTH Core 0 (playText()'s
+// single initial advance) and Core 1 (fillSamplesMono()'s loop). The
+// shared _wasElKeyDown flag is touched only at the bottom of advance,
+// and the existing ordering invariant established at playText() time
+// (publish _state = PLAYING only AFTER the first advance, so the audio
+// task that preempts mid-advance sees IDLE and bails) guarantees that
+// during playback only ONE core touches advance. Outside of those,
+// the public stop() transitions the state under Core 0 with no audio
+// task running. So the bool needs no atomic protection.
+// Cross-core reference: src/morse_generator.cpp:119-131 (the original
+// race fix comment). See docs/memory.md for the memory-keyer plan.
 
 // ---------------------------------------------------------------------------
 // Constructor
@@ -203,6 +222,12 @@ void MorseGenerator::stop() {
     // fresh without a synthetic leading CHAR_SPACE.
     _wasPlaying = false;
     _endedWithBoundarySilence = false;
+    // Unkey the radio if we were mid-mark. Always safe — the bus
+    // saturates the refcount at 0 so extra keyUp() calls are no-ops.
+    if (_wasElKeyDown) {
+        KeyEventBus::keyUp();
+        _wasElKeyDown = false;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -241,12 +266,31 @@ void MorseGenerator::advanceToNextElement() {
         _state = State::IDLE;
         _elKeyDown = false;
         _currentChar = '\0';
+        // Playback completed naturally — unkey the radio if the
+        // last element was a mark. Symmetric with the stop() path.
+        if (_wasElKeyDown) {
+            KeyEventBus::keyUp();
+            _wasElKeyDown = false;
+        }
         return;
     }
 
     const MorseEncoder::Element& el = _elements[_elIdx];
     _elKeyDown = el.keyDown;
     _elSamplePos = 0;
+
+    // Edge-detect the key-down flag into KeyEventBus. Symmetric with
+    // the paddle ISR (`MorseKey::isrDit` / `isrDah` firing KeyEventBus
+    // on every mark boundary), so on-air keying from a stored-text
+    // playback behaves like physical paddles. The bus's atomic refcount
+    // (`std::atomic<int>`, lock-free from any context) makes these
+    // calls safe from whichever core is advancing.
+    //
+    // The edge detector itself is plain `bool` — see the cross-core
+    // invariant comment block at the top of this file.
+    if (_elKeyDown && !_wasElKeyDown)      KeyEventBus::keyDown();
+    else if (!_elKeyDown && _wasElKeyDown) KeyEventBus::keyUp();
+    _wasElKeyDown = _elKeyDown;
 
     // Screensaver wake-up: mirror the paddle-ISR behaviour
     // (`MorseKey::isrDit` / `isrDah` rising-edge wakeup at

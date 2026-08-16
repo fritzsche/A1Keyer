@@ -89,6 +89,14 @@ void CardputerDisplay::render() {
             updateStatusLine(model);
             showWifiNetworkInfo(model);
             break;
+        case DisplayScreen::MEMORY_PICK:
+            updateStatusLine(model);
+            showMemoryPick(model);
+            break;
+        case DisplayScreen::MEMORY_EDIT:
+            updateStatusLine(model);
+            showMemoryEdit(model);
+            break;
         case DisplayScreen::DECODER:
         default:
             updateStatusLine(model);
@@ -561,6 +569,11 @@ void CardputerDisplay::showWifiPasswordInput(MorseModel& model) {
     constexpr int kBoxH = 32;
     M5.Display.drawRect(kBoxX, kBoxY, kBoxW, kBoxH, COLOR_FG);
 
+    // CRITICAL: reset to size 2 BEFORE measuring charW and printing.
+    // The CAPS indicator above dropped the global text size to 1;
+    // without this call the field would render at size 1, half the
+    // height of the size-2 glyph the box was sized for.
+    M5.Display.setTextSize(2);
     M5.Display.setTextColor(COLOR_FG);
     M5.Display.setCursor(kBoxX + 6, kBoxY + 8);
     const char* txt = ti->value();
@@ -654,6 +667,184 @@ void CardputerDisplay::showWifiNetworkInfo(MorseModel& model) {
     M5.Display.setTextColor(0x7384);
     M5.Display.setCursor(0, MAIN_Y + 98);
     M5.Display.print("X: forget  R: retry  ENT: back");
+}
+
+// ─── Memory keyer screens ───────────────────────────────────────────────────
+//
+// Two screens:
+//   MEMORY_PICK — 5×2 grid of slots with a short preview of each.
+//   MEMORY_EDIT — single-line TextInput modal mirroring the Wi-Fi password
+//                 screen layout (so the operator gets a consistent editor).
+
+void CardputerDisplay::showMemoryPick(MorseModel& model) {
+    // Title
+    M5.Display.setFont(nullptr);
+    M5.Display.setTextSize(2);
+    M5.Display.setTextColor(COLOR_ACCENT);
+    M5.Display.setCursor(0, MAIN_Y + 0);
+    M5.Display.print("Memory");
+
+    // Sub-prompt — same line as the title, right-aligned so the layout
+    // matches the Wi-Fi password screen ("WiFi pw" + SSID below).
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(0x7384);
+    M5.Display.setCursor(0, MAIN_Y + 18);
+    M5.Display.print("Pick slot (0-9)");
+
+    // 5 rows × 2 columns of slot previews. At size 1 the default
+    // bitmap font is 8×16 px per glyph; row height 20 px (16 + 4
+    // margin) leaves the bottom hint row visible above y=130 on the
+    // 135 px LCD. Column width 120 px fits ~15 chars at size 1, plenty
+    // for "<digit>: <10 char preview>".
+    constexpr int kRowH    = 20;
+    constexpr int kFirstY  = MAIN_Y + 38;
+    constexpr int kColX0   = 0;
+    constexpr int kColX1   = 120;
+    constexpr int kDigitW  = 8;       // 1 char + ':' at size 1
+    constexpr int kMaxText = 10;      // preview length budget per cell
+
+    M5.Display.setTextSize(1);
+    for (uint8_t i = 0; i < kMemSlots; ++i) {
+        const int row = i / 2;       // 0..4
+        const int col = i % 2;       // 0..1
+        const int y   = kFirstY + row * kRowH;
+        const int x   = (col == 0) ? kColX0 : kColX1;
+
+        // Slot digit + colon in accent so the operator can scan digits
+        // quickly even when most slots are populated.
+        M5.Display.setTextColor(COLOR_ACCENT);
+        M5.Display.setCursor(x, y);
+        M5.Display.printf("%u:", (unsigned)i);
+
+        // Preview the slot's content, or "(empty)" in dim grey when
+        // the slot has no text yet. The preview is clamped to kMaxText
+        // chars to keep both columns aligned.
+        M5.Display.setCursor(x + kDigitW + 4, y);
+        const char* txt = model.getMemory(i);
+        if (!txt || txt[0] == '\0') {
+            M5.Display.setTextColor(0x7384);
+            M5.Display.print("(empty)");
+        } else {
+            M5.Display.setTextColor(COLOR_FG);
+            for (int j = 0; j < kMaxText && txt[j] != '\0'; ++j) {
+                M5.Display.print(txt[j]);
+            }
+        }
+    }
+
+    // Hint row
+    M5.Display.setFont(nullptr);
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(0x7384);
+    M5.Display.setCursor(0, MAIN_Y + 110);
+    M5.Display.print("0-9: pick   ESC: back");
+}
+
+void CardputerDisplay::showMemoryEdit(MorseModel& model) {
+    const int slot = model.memoryEditingSlot();
+    // Defensive: if a render races with a screen change (e.g. the
+    // operator pressed ESC from the picker a millisecond before the
+    // display task woke), fall back to a placeholder title rather
+    // than printing "Mem -1".
+    const char* title = "Mem ?";
+    char titleBuf[16];
+    if (slot >= 0 && slot < (int)kMemSlots) {
+        snprintf(titleBuf, sizeof(titleBuf), "Mem %d", slot);
+        title = titleBuf;
+    }
+
+    // Title — size 2 in accent color. Slot number is read at a glance.
+    M5.Display.setFont(nullptr);
+    M5.Display.setTextSize(2);
+    M5.Display.setTextColor(COLOR_ACCENT);
+    M5.Display.setCursor(0, MAIN_Y + 0);
+    M5.Display.print(title);
+
+    // CAPS indicator — top-right, before the count badge. Only drawn
+    // when caps lock is engaged.
+    if (M5Cardputer.Keyboard.capslocked()) {
+        M5.Display.setTextColor(COLOR_WARN);
+        M5.Display.setTextSize(1);
+        M5.Display.setCursor(SCREEN_W - 88, MAIN_Y + 4);
+        M5.Display.print("CAPS");
+    }
+
+    // Char-count badge — top-right, warning-red when within three
+    // chars of the cap so the operator notices they are running out
+    // of room before the field starts refusing characters.
+    TextInput* ti = model.memoryInput();
+    const size_t len  = ti->length();
+    const size_t cap  = kMemLen - 1;
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(len >= cap - 2 ? COLOR_WARN : 0x7384);
+    M5.Display.setCursor(SCREEN_W - 40, MAIN_Y + 4);
+    M5.Display.printf("%zu/%zu", len, cap);
+
+    // Field box. Width matches the Wi-Fi password screen for muscle
+    // memory; height (32 px) is sized to fit a size-3 glyph (24 px)
+    // with 4 px padding top and bottom. The text inside is rendered
+    // at SIZE 3 — much larger than the Wi-Fi password screen, which
+    // is sized for the masked glyph only. Memory text is never
+    // masked (the operator needs to read what they typed), so we
+    // can afford the larger font.
+    constexpr int kBoxX = 4;
+    constexpr int kBoxY = MAIN_Y + 38;
+    constexpr int kBoxW = SCREEN_W - 8;
+    constexpr int kBoxH = 32;
+    M5.Display.drawRect(kBoxX, kBoxY, kBoxW, kBoxH, COLOR_FG);
+
+    // Horizontal scroll window. At size 3 each glyph is ~18 px wide;
+    // 13 characters fit in the box minus padding. When the cursor
+    // walks past the right edge we slide the visible window leftward
+    // so the cursor stays anchored at the right of the box — newly
+    // typed text is never off-screen. Walking back left follows the
+    // window until it hits the left edge, then stays put.
+    //
+    // CRITICAL: bump to size 3 BEFORE measuring charW and printing.
+    // The count badge above left the global text size at 1, and
+    // Adafruit GFX's textWidth / print honour the current size — so
+    // without this call the field would render at size 1 (the same
+    // size-1 default that masked the Wi-Fi password screen).
+    M5.Display.setTextSize(3);
+    M5.Display.setTextColor(COLOR_FG);
+    const int charW = M5.Display.textWidth("M");
+    constexpr int kPadL = 6;
+    constexpr int kPadR = 4;
+    const int maxChars = (kBoxW - kPadL - kPadR) / charW;
+    const size_t cur = ti->cursorPos();
+    const size_t scrollStart = (cur > (size_t)(maxChars - 1))
+                             ? cur - (maxChars - 1)
+                             : 0;
+    const size_t renderEnd   = (len < scrollStart + (size_t)maxChars)
+                             ? len
+                             : scrollStart + (size_t)maxChars;
+
+    M5.Display.setCursor(kBoxX + kPadL, kBoxY + 4);
+    const char* txt = ti->value();
+    for (size_t i = scrollStart; i < renderEnd; ++i) {
+        M5.Display.print(txt[i]);
+    }
+
+    // Static caret at the cursor position within the visible window.
+    // The mask glyph is irrelevant — memory text is always visible.
+    // (Wi-Fi passwords stay masked; this is the intentional asymmetry
+    // between the two editor screens.)
+    const int cx = kBoxX + kPadL + (int)(cur - scrollStart) * charW;
+    if (cx + 2 <= kBoxX + kBoxW - 4) {
+        M5.Display.fillRect(cx, kBoxY + 4, 2, kBoxH - 8, COLOR_FG);
+    }
+
+    // Hint rows — no FN show (the field is never masked), no
+    // "0-9: switch" (digits type as text inside the editor; switching
+    // slots requires ESC back to MEMORY_PICK). Two compact lines fit
+    // between the box bottom and the screen edge on the 135 px LCD.
+    M5.Display.setFont(nullptr);
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(0x7384);
+    M5.Display.setCursor(0, MAIN_Y + 76);
+    M5.Display.print("ENTER ok  ,/:cur  OPT caps");
+    M5.Display.setCursor(0, MAIN_Y + 92);
+    M5.Display.print("ESC bk");
 }
 
 void CardputerDisplay::renderScrollingText(const char* text, size_t textLen, size_t maxVisible) {

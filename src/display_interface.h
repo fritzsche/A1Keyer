@@ -59,6 +59,25 @@ public:
     /** Show the Wi-Fi status / IP / error screen. */
     virtual void showWifiNetworkInfo(MorseModel& model) = 0;
 
+    /**
+     * Show the memory-keyer slot picker.
+     *
+     * Rendered after `M` from DECODER. Body lists the 10 slots with a
+     * small preview of any non-empty entries so the operator can see at
+     * a glance which slots are populated. The next keystroke (0-9)
+     * advances to MEMORY_EDIT for that slot.
+     */
+    virtual void showMemoryPick(MorseModel& model) = 0;
+
+    /**
+     * Show the memory-keyer slot editor.
+     *
+     * Modal single-line editor reusing the same TextInput control that
+     * backs the Wi-Fi passphrase screen. Title is "Mem N" in accent
+     * color; field is masked by default with FN toggling reveal.
+     */
+    virtual void showMemoryEdit(MorseModel& model) = 0;
+
     /** Put display into low-power / sleep mode (screen-saver). */
     virtual void powerOff() = 0;
 

@@ -155,6 +155,44 @@ void Winkey::syncWpmFromLocal() {
     _bridge.setWpmFromLocal(model.wpm());
 }
 
+// Memory-keyer entry point. See winkey.h for the contract.
+void Winkey::playLocalMemoryText(const char* text) {
+    // Empty / unset slot is a no-op — pressing digit N on an empty
+    // memory must not produce a click, just silence.
+    if (!text || text[0] == '\0') return;
+
+    MorseGenerator* gen = AudioEngine::morseGen();
+    if (!gen) return;
+    // Mirrors the P-key busy gate at main.cpp:500-505: if a previous
+    // playback is still running, drop the new request rather than
+    // restart mid-element (which would produce an audible click and
+    // a confusing on-air glitch). The user can hit the digit again
+    // after the current playback completes.
+    if (gen->isPlaying()) return;
+
+    MorseModel::instance().setMode(KeyerMode::ENCODER);
+
+    if (_bridge.isOpen()) {
+        // Host is attached — route through the bridge so the connected
+        // logger sees the per-byte K1EL echo. Each feed() uppercases
+        // and echoes immediately; poll() drains the FIFO through
+        // cbSendText → MorseGenerator::playText as one chunk. This is
+        // literally the same code path host-driven playback uses, so
+        // memory playback is indistinguishable to the logger from
+        // playback it initiated itself.
+        for (const char* p = text; *p; ++p) {
+            _bridge.feed(static_cast<uint8_t>(*p));
+        }
+        _bridge.poll();
+    } else {
+        // No host attached — play directly. Radio keying happens via
+        // the new MorseGenerator → KeyEventBus wiring (Stage 2); the
+        // bridge is bypassed so we don't spam the serial console with
+        // protocol bytes while the operator is local-only.
+        gen->playText(text);
+    }
+}
+
 const WinkeyBridge* Winkey::bridge() {
     return &_bridge;
 }
@@ -164,6 +202,7 @@ const WinkeyBridge* Winkey::bridge() {
 void Winkey::begin() {}
 void Winkey::poll() {}
 void Winkey::syncWpmFromLocal() {}
+void Winkey::playLocalMemoryText(const char*) {}
 const WinkeyBridge* Winkey::bridge() { return nullptr; }
 
 #endif  // UNIT_TEST
