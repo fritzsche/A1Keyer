@@ -94,6 +94,41 @@ stored text. Clearing the device settings (the `"morse"` namespace)
 does **not** affect the memory bank — they live in separate NVS
 namespaces.
 
+### 2.6 Cancel-on-any-keypress
+
+While a memory slot or the `P`-key "Hello Morse!" is playing, **any
+key press stops playback immediately**. This is true for:
+
+- **Cardputer keyboard** — any key (W, F, V, M, K, D, C, N, digits,
+  `P`, Enter, Esc, …).
+- **Morse paddle** — pressing either the DIT or DAH paddle.
+
+The key press is **consumed**: it stops playback but does **not**
+generate morse code, key the radio, open an overlay, or perform any
+other action. While the key remains held, it is ignored — the next
+"real action" requires the operator to release and re-press. This
+matches the intuition that any keydown during playback is a deliberate
+abort, not a multi-tap.
+
+Concrete examples:
+
+- Press `P` from `DECODER` → "Hello Morse!" plays. Hold `P` through
+  playback → playback stops on the first held tick, no restart on
+  subsequent held ticks. Release and re-press `P` → "Hello Morse!"
+  plays once.
+- Press digit `3` from `DECODER` → memory 3 plays. Press `W` mid-macro
+  → playback stops; `WPM_SETTINGS` does **not** open. Release `W`,
+  press `W` again → overlay opens.
+- Press digit `3` from `DECODER` → memory 3 plays. Tap the DIT paddle
+  mid-element → playback stops; GPIO4 stays LOW for the entire hold.
+  Release the paddle, tap it again → a real dit (sidetone blip, GPIO4
+  HIGH for one dit-length).
+- Squeeze both DIT and DAH during playback → playback stops; both
+  paddles are ignored until **both** are released. Then the next
+  paddle keydown is a real action.
+
+See § 4.4 and § 6.3 for the implementation rationale.
+
 ---
 
 ## 3. Storage
@@ -176,7 +211,54 @@ If `MorseGenerator::isPlaying()` is true when `playLocalMemoryText`
 runs, the call returns immediately. This prevents a mid-element restart
 which would produce an audible click and a confusing on-air glitch.
 The operator can hit the digit again after the current playback
-completes.
+completes (or after explicitly cancelling it — see § 4.4).
+
+### 4.4 Cancel-on-any-keypress gates
+
+Two consumer-side gates enforce the operator-facing behaviour in § 2.6.
+Both run *before* any per-key handler / keyer branch, so the consumed
+press never reaches the rest of the system.
+
+**Keyboard side** — `src/main.cpp::handleKeyboard()`:
+
+- After all key state is sampled but before the W/F/V/M/D/C/N/K/P
+  handlers run, if `MorseGenerator::isPlaying()` is true, the gate
+  calls `gen->stop()`, sets `MorseModel::setMode(KeyerMode::KEYER)`,
+  copies every `wasX = xKey` (so the next tick sees no stale edge
+  for any tracked key), and returns.
+- The `wasX = xKey` update is what implements "ignore the key until
+  release": holding `W` through the stop does **not** fire the `W`
+  handler on subsequent ticks. The operator must release and re-press
+  for the action to take effect.
+- This gate runs on the main loop (Core 0 in current builds).
+
+**Paddle side** — `src/audio_engine.cpp::fillBuffer()`:
+
+- At the top of `fillBuffer()` (the audio task on Core 1), if the
+  generator is playing and a paddle is held, the gate calls
+  `gen->stop()`, sets mode back to `KEYER`, and sets the static flag
+  `AudioEngine::s_paddleSuppressed = true`.
+- While `s_paddleSuppressed` is true, `fillBuffer()` skips every
+  keyer branch (straight / iambic / morseGen) and emits silence.
+  This keeps the radio quiet (no `KeyEventBus::keyDown` from the
+  iambic keyer), the decoder ring buffer empty, and the sidetone
+  silent for the entire duration of the held press.
+- When the paddle is released, `fillBuffer()` clears the flag and
+  calls `MorseKey::clearMemory()` to drop any pending memory flags.
+  The release tick itself is also silenced so the falling edge is
+  not observed by the iambic keyer.
+
+**Why two gates?** The two press sources run on different cores and
+go through different consumers: the keyboard handler runs on the main
+loop and dispatches to per-key handlers; paddle presses are GPIO
+interrupts read by the iambic/straight keyer in the audio task.
+Adding a single shared gate would either be racy or require a
+cross-core flag for every keyer state. Two narrow gates keep each
+core's logic self-contained. The two gates are independent — both
+may fire on the same tick (e.g. paddle press + keyboard key), and
+both `gen->stop()` calls are idempotent.
+
+See § 6.3 for the cross-core-safety argument and § 8 for risks.
 
 ---
 
@@ -287,7 +369,41 @@ generator at a time. The bus calls themselves are atomic via
 `std::atomic` refcount dispatch. See the comment block at
 `morse_generator.cpp` for the full invariant.
 
-### 6.4 Test coverage
+### 6.4 Cancel-gate cross-core safety
+
+The two cancel gates in § 4.4 are independent and run on different
+cores:
+
+- **Keyboard gate** runs in `handleKeyboard()` on the main loop. It
+  reads `gen->isPlaying()`, calls `gen->stop()`, writes `wasX = xKey`
+  for every tracked key, and returns. `gen->stop()` writes to
+  `MorseGenerator` state that the audio task also reads, so the
+  ordering invariant from § 6.3 applies: a single atomic write that
+  the audio task observes on its next `fillBuffer()` call. `MorseGenerator::stop()`
+  itself is idempotent and is safe to call from any context — the
+  survey confirmed no caller holds a lock that would deadlock.
+
+- **Paddle gate** runs in `fillBuffer()` on the audio task (Core 1).
+  It reads `MorseKey::isDitPressed()` / `isDahPressed()`, which read
+  the same atomic `s_keyState.state[]` flags the paddle ISRs write —
+  standard acquire/release semantics, no new atomicity concerns. The
+  `s_paddleSuppressed` flag is a plain `bool` because it is read and
+  written only on the audio task — no cross-core visibility needed.
+
+If both gates fire on the same tick from different cores, both
+`gen->stop()` calls happen. The first transitions the gen to `IDLE`
+and issues `KeyEventBus::keyUp()` if mid-mark; the second sees the
+gen already `IDLE` and returns as a no-op. The bus refcount
+saturates-at-0 so an extra `keyUp` is harmless.
+
+The `s_paddleSuppressed` flag is **not** visible to the keyboard
+gate (it lives on the audio task and the keyboard handler is on the
+main loop). This is intentional — the keyboard and paddle presses
+are tracked independently so the operator can press a keyboard key
+*and* a paddle at the same time, and both presses are consumed
+without either one re-firing.
+
+### 6.5 Test coverage
 
 `test/test_morse_generator_bus` drives a known element sequence by
 calling `advanceToNextElement()` directly (mirroring the
@@ -295,6 +411,15 @@ calling `advanceToNextElement()` directly (mirroring the
 with no double-down across adjacent marks, exactly one `keyUp` on
 natural playback completion, and exactly one `keyUp` on
 `stop()`-mid-playback.
+
+The cancel-gate logic in § 4.4 lives in `audio_engine.cpp` and
+`main.cpp`, neither of which is part of the `UNIT_TEST` host build
+(`audio_engine.cpp` depends on ESP-IDF I2S; `main.cpp` depends on
+`M5Cardputer`). The behaviour is therefore covered by the on-device
+smoke test in § 9.3, not by a host suite. The contract being relied
+upon — that `MorseGenerator::stop()` is idempotent and unkeys the bus
+correctly — is covered by `test_morse_generator` and
+`test_morse_generator_bus`.
 
 ---
 
@@ -394,6 +519,23 @@ natural playback completion, and exactly one `keyUp` on
    `_memoryEditorBuf`, not to `_memory[slot]`. Edits only persist on
    Enter. ESC discards. This matches the Wi-Fi password pattern.
 
+9. **Cancel-on-any-keypress "consume" semantics** (§ 4.4). The
+   keyboard gate updates `wasX = xKey` for **every** tracked key on
+   the consumed tick — a held key does not fire its handler on
+   subsequent ticks. If a future change adds a new tracked key
+   without including it in that update list, the new key would
+   fire on the next tick (because `wasX` would be stale). The list
+   at `main.cpp::handleKeyboard` must stay in sync with the static
+   `wasX` declarations above it. The paddle gate's `s_paddleSuppressed`
+   flag is a plain `bool` (not `std::atomic`) — only safe because the
+   audio task is the sole reader and writer.
+
+10. **Paddle suppression drops one element of "sensitivity".** While
+    a paddle is suppressed, the operator's intentional squeeze on
+    DIT+DAH is invisible to the iambic keyer. After release + a fresh
+    press, the keyer works normally. This is the intended trade-off —
+    the cancel gesture is a deliberate abort, not a CW character.
+
 ---
 
 ## 9. Verification
@@ -465,6 +607,35 @@ Tab5 doesn't apply.
     Morse!" through the speaker. With `KEYING` enabled, GPIO4 also
     keys during each dit/dah (new behaviour, expected per § 8.1).
 12. **Persistence:** power-cycle. Press `3` — stored CQ plays again.
+
+13. **Cancel-on-any-keypress — paddle held suppresses keying:** press
+    `3` to start memory 3 (GPIO4 toggling). Press the DIT paddle
+    mid-element → playback stops immediately, sidetone cuts off, GPIO4
+    returns LOW. **GPIO4 must stay LOW for the entire duration the
+    paddle remains held.** No element completes after the cancel.
+14. **Cancel-on-any-keypress — fresh press after release is real:**
+    continue from #13 with paddle still held (GPIO4 LOW). Release the
+    paddle → GPIO4 stays LOW (no spurious re-key on release). Press
+    the DIT paddle again → a real dit plays (sidetone blip, GPIO4
+    HIGH for one dit-length).
+15. **Cancel-on-any-keypress — held P cancels itself:** press `P` to
+    start "Hello Morse!". Hold `P` through playback → playback stops
+    on the first held tick. Subsequent held ticks produce no
+    restart. Release `P`, press `P` again → "Hello Morse!" plays once.
+16. **Cancel-on-any-keypress — held W opens no overlay:** press `P` to
+    play "Hello Morse!". Press `W` mid-playback → playback stops;
+    `WPM_SETTINGS` does **not** appear. Release `W`, press `W` again →
+    `WPM_SETTINGS` opens.
+17. **Cancel-on-any-keypress — held digit does not start a memory:**
+    press `P` to play "Hello Morse!". Press `2` mid-playback →
+    playback stops; slot 2 does not start playing (the busy gate
+    prevented the start; the cancel gate consumed the press).
+    Release `2`, press `2` again → slot 2 plays.
+18. **Cancel-on-any-keypress — squeeze suppressed until both released:**
+    press `P` to play "Hello Morse!". Squeeze both DIT and DAH
+    paddles → playback stops; GPIO4 LOW. Release DIT only, keep DAH
+    held → GPIO4 still LOW. Release DAH → GPIO4 still LOW. Press DIT
+    again → a real dit plays.
 
 ### 9.4 Regression checks
 

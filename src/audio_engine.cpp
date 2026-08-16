@@ -18,12 +18,14 @@
 #include "key_envelop.h"
 #include "iambic_keyer.h"
 #include "straight_keyer.h"
+#include "morse_key.h"
 #include "display_model.h"
 #include <M5Unified.h>
 #include <M5Unified.h>
 #include <driver/gpio.h>
 #include <driver/i2s_std.h>
 #include <cmath>
+#include <cstring>
 
 // ---------------------------------------------------------------------------
 // Static member definitions
@@ -38,6 +40,7 @@ MorseGenerator* AudioEngine::s_morseGen      = nullptr;
 IambicKeyer*   AudioEngine::s_keyer        = nullptr;
 StraightKeyer* AudioEngine::s_straightKeyer = nullptr;
 int            AudioEngine::s_volumePercent   = DEFAULT_VOLUME_PERCENT;
+bool           AudioEngine::s_paddleSuppressed = false;
 
 // ---------------------------------------------------------------------------
 // Shared keying envelope
@@ -288,6 +291,43 @@ bool AudioEngine::initI2S() {
 // ---------------------------------------------------------------------------
 void AudioEngine::fillBuffer(int16_t* out, size_t stereoFrames) {
     static uint32_t count = 0;
+
+    // ─── Cancel playback on paddle press ─────────────────────────────
+    // Any paddle press (DIT or DAH) while the MorseGenerator is
+    // playing stops playback and "consumes" the press — it must not
+    // key the radio or feed the decoder. We then keep ignoring the
+    // paddle until it is released so the held paddle does not
+    // immediately start driving the keyer once playback is over.
+    // See docs/memory.md §"Cancel-on-any-keypress" for the rationale.
+    if (s_morseGen && s_morseGen->isPlaying() &&
+        (MorseKey::isDitPressed() || MorseKey::isDahPressed())) {
+        s_morseGen->stop();
+        MorseModel::instance().setMode(KeyerMode::KEYER);
+        s_paddleSuppressed = true;
+    }
+
+    // While the press is suppressed AND a paddle is still held, skip
+    // every keyer branch (straight, iambic) and emit silence. This
+    // keeps the radio quiet, the decoder ring buffer empty, and the
+    // sidetone silent for the whole duration of the held press. The
+    // MorseKey memory[] flags are intentionally NOT cleared here —
+    // they are cleared on the release tick below so the iambic keyer
+    // cannot see a pending-but-consumed press when we resume.
+    if (s_paddleSuppressed) {
+        const bool paddleHeld = MorseKey::isDitPressed() || MorseKey::isDahPressed();
+        if (!paddleHeld) {
+            // Release tick: clear the flag AND drop any pending
+            // memory[] flags so the iambic keyer does not process the
+            // suppressed press on the next tick. state[] is already
+            // MEMORY_UNSET (set by the falling-edge ISR), so the
+            // clearMemory() call is effectively a memory-only clear.
+            s_paddleSuppressed = false;
+            MorseKey::clearMemory();
+        }
+        MorseModel::instance().setEncoderChar(0);
+        std::memset(out, 0, sizeof(int16_t) * stereoFrames * 2);
+        return;
+    }
 
     // Keyer takes priority if any memory flag is set (iambic B paddle active)
     // Reference: extern/main.c:441 — if current_element == NONE and memory[DIT/DAH] set → play

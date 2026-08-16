@@ -159,6 +159,15 @@ public:
     static void createMorseGen();
     static void deleteMorseGen();
 
+    /// True when the audio task has consumed a paddle press and must
+    /// keep ignoring it until the paddle is released. Set by
+    /// fillBuffer() when it cancels MorseGenerator playback on a
+    /// paddle rising edge; cleared when fillBuffer() observes the
+    /// paddle released. Read/written only on the audio task (Core 1),
+    /// so a plain bool is sufficient — no cross-core synchronisation
+    /// needed. See audio_engine.cpp::fillBuffer for the gate logic.
+    static bool s_paddleSuppressed;
+
     // Volume control — logarithmic scale (human perception is logarithmic).
     // percent: 0–100, where 50% sounds half as loud as 100%.
 

@@ -544,6 +544,74 @@ static void handleKeyboard() {
     auto& model = MorseModel::instance();
     const DisplayScreen sc = model.screen();
 
+    // ─── Cancel playback on any key press ─────────────────────────────
+    // Any keyboard key press during memory / P-key playback stops the
+    // MorseGenerator and is "consumed" — its per-key handler does NOT
+    // fire on this tick or on subsequent ticks while the key remains
+    // held. The user must release the key and press it again for the
+    // action to take effect. We update wasX = xKey for every tracked
+    // key before returning so the next tick sees no stale edge — that
+    // is what implements "ignore the key until release". See
+    // docs/memory.md §"Cancel-on-any-keypress".
+    MorseGenerator* gen = AudioEngine::morseGen();
+
+    // ─── ONE-SHOT keypress log (only when the held-key state changes) ──
+    // Throttled: skip the same key state until it changes. Keeps the log
+    // ring free for real events.
+    static int s_lastKeyState = -1;
+    const int keyStateHash =
+        (int)kb.keyList().size() +
+        (pKey   ? 0x01 : 0) +
+        (mKey   ? 0x02 : 0) +
+        (kKey   ? 0x04 : 0) +
+        (dKey   ? 0x08 : 0) +
+        (cKey   ? 0x10 : 0) +
+        (nKey   ? 0x20 : 0) +
+        (wKey   ? 0x40 : 0) +
+        (enter  ? 0x80 : 0) +
+        (semicolon ? 0x100 : 0) +
+        (period    ? 0x200 : 0) +
+        ((unsigned)pollKeys().printable << 10);
+    if (keyStateHash != s_lastKeyState) {
+        s_lastKeyState = keyStateHash;
+        Log::write("[KB-NEW] list=%d printable=%02x pKey=%d mKey=%d kKey=%d dKey=%d cKey=%d nKey=%d wKey=%d enter=%d semi=%d period=%d sc=%d\n",
+            (int)kb.keyList().size(),
+            (unsigned)pollKeys().printable,
+            pKey, mKey, kKey, dKey, cKey, nKey, wKey,
+            enter, semicolon, period, (int)sc);
+    }
+
+    // ─── Cancel playback on rising edge of any tracked key ─────────────
+    // EDGE-triggered (not level-triggered): we only cancel on the FIRST
+    // tick of a fresh keypress. After that, the same held press is
+    // "consumed" by updating wasX = xKey and returning, so the per-key
+    // edge handlers below don't fire on subsequent ticks. This is what
+    // prevents the gate from cancelling playback the very next tick
+    // after it was started by the SAME press — which would otherwise
+    // cut off audio after only a click of the first element.
+    static bool s_wasAnyKeyHeld = false;
+    const bool anyKeyHeld = wKey || fKey || pKey || vKey || mKey
+                          || kKey || dKey || cKey || nKey || enter
+                          || semicolon || period;
+    const bool anyKeyEdge = anyKeyHeld && !s_wasAnyKeyHeld;
+    s_wasAnyKeyHeld = anyKeyHeld;
+
+    if (gen && gen->isPlaying() && anyKeyEdge) {
+        Log::write("[GATE] cancelling playback (edge) — list=%d printable=%02x\n",
+            (int)kb.keyList().size(), (unsigned)pollKeys().printable);
+        gen->stop();
+        model.setMode(KeyerMode::KEYER);
+    }
+    if (gen && gen->isPlaying() && anyKeyHeld) {
+        // Same press still held — consume it: update wasX so the per-key
+        // edge handlers below don't fire on this held press.
+        wasW = wKey; wasF = fKey; wasP = pKey; wasV = vKey; wasM = mKey;
+        wasK = kKey; wasD = dKey; wasC = cKey; wasN = nKey;
+        wasEnter = enter; wasShift = shift; wasBtnA = btnA;
+        wasSemicolon = semicolon; wasPeriod = period;
+        return;
+    }
+
     // W → WPM settings (toggle). The gate is "not the password input
     // field" — i.e. the function keys stay available on the wifi scan
     // list and the wifi network-info screens, so the user can reach a
@@ -676,11 +744,15 @@ static void handleKeyboard() {
     if (pKey && !wasP &&
         sc != DisplayScreen::MEMORY_PICK &&
         sc != DisplayScreen::MEMORY_EDIT) {
+        Log::write("[DIAG-P] P handler firing: sc=%d pKey=%d wasP=%d\n", (int)sc, pKey, wasP);
         auto gen = AudioEngine::morseGen();
         if (gen && !gen->isPlaying()) {
             gen->playText("Hello Morse!");
             model.setMode(KeyerMode::ENCODER);
             DisplayTask::requestRender();
+            Log::write("[DIAG-P] playText called, isPlaying=%d\n", (int)gen->isPlaying());
+        } else {
+            Log::write("[DIAG-P] playText SKIPPED: gen=%p isPlaying=%d\n", (void*)gen, gen ? (int)gen->isPlaying() : -1);
         }
     } else if (!pKey && wasP && model.mode() == KeyerMode::ENCODER) {
         // P released and was in ENCODER mode — switch back if playback also finished
@@ -767,13 +839,17 @@ static void handleKeyboard() {
             digit = pk.printable - '0';
         }
         if (digit >= 0 && digit != s_lastDigit) {
+            Log::write("[DIAG-D] digit=%d printable=%02x lastDigit=%d\n", digit, (unsigned)pk.printable, s_lastDigit);
             const char* text = model.getMemory((uint8_t)digit);
             if (text && text[0] != '\0') {
+                Log::write("[DIAG-D] slot has text: \"%.32s\"\n", text);
                 // Only call the playback method when there is actually
                 // something to play — pressing an unset slot is a
                 // silent no-op rather than an error beep.
                 Winkey::playLocalMemoryText(text);
                 DisplayTask::requestRender();
+            } else {
+                Log::write("[DIAG-D] slot empty: text=%p text[0]=%d\n", (const void*)text, text ? (int)(unsigned char)text[0] : -1);
             }
         }
         s_lastDigit = digit;
