@@ -35,8 +35,10 @@ Sections 1–4 are operator-facing; sections 5–10 are developer-facing.
 - **Function:** ten named CW text slots, addressable by the digits
   `0`..`9`. Pressing a digit from the **DECODER** screen plays the slot
   through sidetone, the WinKeyer bridge, and the radio keying output.
-  Editing uses a two-key gesture: `M` opens a slot picker, the next
-  digit opens the editor pre-filled with the slot's persisted text.
+  Editing uses a three-gesture flow: `M` opens a single-slot picker,
+  `0`..`9` switches which slot is shown, then `Enter` opens the editor
+  pre-filled with the currently shown slot. `X` / `x` clears the shown
+  slot from the picker.
 - **Persistence:** NVS namespace `"memory"`, loaded once at boot and
   written back on every commit (Enter from the editor).
 - **Default:** **all slots empty**. Pressing a digit for an unset slot
@@ -106,10 +108,10 @@ an error — `playLocalMemoryText` returns when `text[0] == '\0'`.
 
 The bank is loaded into the model once at boot (`setup()` in
 `main.cpp`). The bank is written back on every commit (Enter from the
-editor) via `memoryBankSave()`. Power-cycling preserves the operator's
-stored text. Clearing the device settings (the `"morse"` namespace)
-does **not** affect the memory bank — they live in separate NVS
-namespaces.
+editor) and on every clear (`X` / `x` from the picker) via
+`memoryBankSave()`. Power-cycling preserves the operator's stored text.
+Clearing the device settings (the `"morse"` namespace) does **not**
+affect the memory bank — they live in separate NVS namespaces.
 
 ### 2.6 Cancel-on-any-keypress
 
@@ -170,7 +172,7 @@ The constants live in `src/memory_store.h`:
 ```cpp
 inline constexpr const char* kMemoryNamespace = "memory";
 inline constexpr uint8_t kMemSlots = 10;
-inline constexpr size_t  kMemLen   = 32;
+inline constexpr size_t  kMemLen   = 81;
 ```
 
 `memoryBankLoad(MemoryBank& out)` reads each slot key into the
@@ -297,8 +299,10 @@ Two new `DisplayScreen` values drive the editor:
   for the currently shown slot.
 - `MEMORY_EDIT` — opens after `Enter` is pressed in `MEMORY_PICK`
   (cursor-target determines which slot). Renders the `TextInput`
-  control (the same widget used by the Wi-Fi passphrase screen), masked
-  by default, pre-filled with the slot's persisted text.
+  control (the same widget used by the Wi-Fi passphrase screen), but
+  **never masked** — memory text is not a secret like a passphrase, the
+  operator must read what they typed. Pre-filled with the slot's
+  persisted text, cursor at end.
 
 ### 5.2 Editor reuse
 
@@ -709,8 +713,6 @@ Tab5 doesn't apply.
 
 - **Multi-tap macros.** `{NAME}` substitution from a separate `name`
   table; `%` for sequential contest exchanges.
-- **Forget-memory gesture.** Long-press a digit, or an `M` + `Backspace`
-  sequence inside the editor, to clear a slot.
 - **Paddle recording.** Capture operator keying into a slot for replay
   — useful for ad-hoc CQ styles that don't fit the canned set.
 - **Per-slot save.** Skip `Preferences::putString` for unchanged rows

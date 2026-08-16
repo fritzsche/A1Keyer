@@ -9,7 +9,7 @@
  *
  * Ten slots addressed by the keyboard digits '0'..'9'. Each slot holds
  * a short CW phrase — typical contest macros ("CQ CQ DE W1AW K",
- * "TU 5NN 001") fit comfortably under kMemLen-1 = 31 characters.
+ * "TU 5NN 001") fit comfortably under kMemLen-1 = 80 characters.
  *
  * The store is a plain struct so the whole module can be exercised on
  * the host against a mock Preferences — see test/test_memory_store.
