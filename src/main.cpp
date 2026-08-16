@@ -355,45 +355,105 @@ static void handleMemoryScreen(MorseModel& model, const CardputerKeyState& ks) {
         static bool wasDigit[10] = {false,false,false,false,false,
                                     false,false,false,false,false};
         static bool wasEsc = false;
+        // Enter primes identically to Esc — so a held Enter that
+        // occurred just before M-press does not auto-commit.
+        static bool wasEnter = false;
+        // x/X primes to the current printable-held state so a key the
+        // operator was still holding across M-entry does not double-fire.
+        static bool wasX = false;
 
         int digit = -1;
         if (ks.printable >= '0' && ks.printable <= '9') digit = ks.printable - '0';
+        const bool xKey = (ks.printable == 'x' || ks.printable == 'X');
 
         if (screenJustChanged) {
             for (int i = 0; i < 10; ++i) wasDigit[i] = (i == digit);
             wasEsc = ks.escape;
+            wasEnter = ks.enter;
+            wasX = xKey;
         }
 
+        // Digit → switch the slot the picker is showing. We DO NOT
+        // transition to MEMORY_EDIT here — that happens on Enter. The
+        // currently shown slot lives in `_memoryPickSlot`, which the
+        // renderer (showMemoryPick) reads each frame.
         if (digit >= 0 && !wasDigit[digit]) {
-            // Pick slot → transition to the editor pre-filled with the
-            // slot's persisted text. setMemoryEditingSlot re-binds the
-            // TextInput lazily in memoryInput(); setValue overwrites the
-            // (initially empty) editor buffer with the saved CW text so
-            // the operator can edit in place rather than starting from
-            // scratch.
-            //
-            // CRITICAL: primePrintableHeld prevents the still-held digit
-            // from typing itself into the buffer on the very next tick.
-            // setValue() resets _prevPrintable to 0, so without priming
-            // the editor's first feed() sees a fresh "edge" on the same
-            // '2' the user is still holding — the bug the operator
-            // observed where pressing M then 2 prefilled the field with
-            // "2". Mirrors primeEnterHeld() in the wifi password screen.
-            model.setMemoryEditingSlot(digit);
-            TextInput* ti = model.memoryInput();
-            ti->setValue(model.getMemory((uint8_t)digit));
-            ti->primePrintableHeld(ks.printable);
-            model.setScreen(DisplayScreen::MEMORY_EDIT);
+            model.setMemoryPickSlot(digit);
             DisplayTask::requestRender();
         }
 
+        // Esc → cancel picker, back to DECODER.
         if (ks.escape && !wasEsc) {
             model.setScreen(DisplayScreen::DECODER);
             DisplayTask::requestRender();
         }
 
+        // x/X → clear the currently shown slot and persist. Edge-triggered
+        // so holding the key does not keep wiping. No confirmation prompt:
+        // the operator asked for it explicitly and the picker immediately
+        // re-renders the red "(empty)" placeholder, which is the visible
+        // feedback. Stays on MEMORY_PICK so the operator can immediately
+        // press Enter to type fresh content into the now-empty slot.
+        if (xKey && !wasX) {
+            const int cursor = model.memoryPickSlot();
+            const uint8_t target = (cursor >= 0 && cursor < (int)kMemSlots)
+                                   ? (uint8_t)cursor : 0;
+            model.setMemory(target, "");
+            MemoryBank bank;
+            for (uint8_t i = 0; i < kMemSlots; ++i) {
+                memCopyStr(bank.slot[i], kMemLen, model.getMemory(i));
+            }
+            if (memoryBankSave(bank)) {
+                Log::info("[MEM] cleared m%d", target);
+            } else {
+                Log::error("[MEM] clear FAILED for slot %d", target);
+            }
+            DisplayTask::requestRender();
+        }
+
+        // Enter → commit the currently shown slot into MEMORY_EDIT,
+        // pre-filling the TextInput buffer with the slot's persisted
+        // text. The "switch then commit" flow is `M → 3 → Enter` to
+        // edit slot 3 (or any default slot on first M then Enter).
+        //
+        // CRITICAL: primePrintableHeld prevents the still-held
+        // printable (the Enter-as-printable on the keyboard, or zero)
+        // from typing itself into the buffer on the very next tick.
+        // setValue() resets _prevPrintable to 0, so without priming
+        // the editor's first feed() sees a fresh "edge" on the same
+        // key the user was holding — the bug primePrintableHeld was
+        // introduced to fix in the original digit-edge path.
+        //
+        // CRITICAL: primeEnterHeld() is just as important. The Enter
+        // the operator just pressed is still physically held when the
+        // editor's first feed() runs on the next tick; setValue() resets
+        // _prevEnter to 0 too, so without priming the held Enter would
+        // immediately commit on entry — the operator would never see
+        // MEMORY_EDIT, the screen would jump straight back to DECODER.
+        // Mirrors primeEnterHeld() in the wifi password screen.
+        //
+        // The early `return;` is required: we leave MEMORY_PICK on
+        // this tick, so the digit/Esc closing writes below must NOT
+        // run (they belong to the PICK state, not EDIT). MEMORY_EDIT
+        // does its own screenJustChanged handling on the next tick.
+        if (ks.enter && !wasEnter) {
+            const int cursor = model.memoryPickSlot();
+            const uint8_t target = (cursor >= 0 && cursor < (int)kMemSlots)
+                                   ? (uint8_t)cursor : 0;
+            model.setMemoryEditingSlot((int)target);
+            TextInput* ti = model.memoryInput();
+            ti->setValue(model.getMemory(target));
+            ti->primePrintableHeld(ks.printable);
+            ti->primeEnterHeld();
+            model.setScreen(DisplayScreen::MEMORY_EDIT);
+            DisplayTask::requestRender();
+            return;
+        }
+        wasEnter = ks.enter;
+
         for (int i = 0; i < 10; ++i) wasDigit[i] = (i == digit);
         wasEsc = ks.escape;
+        wasX = xKey;
         return;
     }
 
@@ -669,7 +729,9 @@ static void handleKeyboard() {
         sc != DisplayScreen::MEMORY_EDIT &&
         sc == DisplayScreen::DECODER) {
         Log::write("[KB] M pressed → MEMORY_PICK\n");
-        model.setMemoryPickSlot(-1);
+        // Default cursor lands on slot 0 so the operator sees the first
+        // memory by default. They switch slots with 0-9 inside the picker.
+        model.setMemoryPickSlot(0);
         model.setScreen(DisplayScreen::MEMORY_PICK);
         model.setOverlayStartMillis(millis());
         DisplayTask::requestRender();

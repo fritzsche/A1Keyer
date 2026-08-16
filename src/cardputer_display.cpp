@@ -677,67 +677,62 @@ void CardputerDisplay::showWifiNetworkInfo(MorseModel& model) {
 //                 screen layout (so the operator gets a consistent editor).
 
 void CardputerDisplay::showMemoryPick(MorseModel& model) {
-    // Title
+    // Single-slot view: show the slot at `_memoryPickSlot` at a large
+    // font. Digits 0-9 switch the cursor (no transition), Enter opens
+    // the editor, Esc cancels back to DECODER. Larger readable font is
+    // now possible because the screen is no longer split ten ways.
+
     M5.Display.setFont(nullptr);
+
+    // Resolve the active slot. `memoryPickSlot()` is the atomic cursor
+    // owned by MorseModel — handleMemoryScreen() updates it on every
+    // digit press. Defensive `-1`/out-of-range fallback to slot 0.
+    const int cursor = model.memoryPickSlot();
+    const uint8_t activeSlot =
+        (cursor >= 0 && cursor < (int)kMemSlots) ? (uint8_t)cursor : 0;
+    const char* txt = model.getMemory(activeSlot);
+    const bool empty = !txt || txt[0] == '\0';
+
+    // Title — "Memory N" in accent, size 2 (16x32 px). The slot number
+    // is part of the title so the operator reads "Memory 3" at a
+    // glance; a separate right-aligned "Slot N / 10" badge is no
+    // longer needed and was removed.
     M5.Display.setTextSize(2);
     M5.Display.setTextColor(COLOR_ACCENT);
     M5.Display.setCursor(0, MAIN_Y + 0);
-    M5.Display.print("Memory");
+    char titleBuf[16];
+    snprintf(titleBuf, sizeof(titleBuf), "Memory %u", (unsigned)activeSlot);
+    M5.Display.print(titleBuf);
 
-    // Sub-prompt — same line as the title, right-aligned so the layout
-    // matches the Wi-Fi password screen ("WiFi pw" + SSID below).
-    M5.Display.setTextSize(1);
-    M5.Display.setTextColor(0x7384);
-    M5.Display.setCursor(0, MAIN_Y + 18);
-    M5.Display.print("Pick slot (0-9)");
-
-    // 5 rows × 2 columns of slot previews. At size 1 the default
-    // bitmap font is 8×16 px per glyph; row height 20 px (16 + 4
-    // margin) leaves the bottom hint row visible above y=130 on the
-    // 135 px LCD. Column width 120 px fits ~15 chars at size 1, plenty
-    // for "<digit>: <10 char preview>".
-    constexpr int kRowH    = 20;
-    constexpr int kFirstY  = MAIN_Y + 38;
-    constexpr int kColX0   = 0;
-    constexpr int kColX1   = 120;
-    constexpr int kDigitW  = 8;       // 1 char + ':' at size 1
-    constexpr int kMaxText = 10;      // preview length budget per cell
-
-    M5.Display.setTextSize(1);
-    for (uint8_t i = 0; i < kMemSlots; ++i) {
-        const int row = i / 2;       // 0..4
-        const int col = i % 2;       // 0..1
-        const int y   = kFirstY + row * kRowH;
-        const int x   = (col == 0) ? kColX0 : kColX1;
-
-        // Slot digit + colon in accent so the operator can scan digits
-        // quickly even when most slots are populated.
-        M5.Display.setTextColor(COLOR_ACCENT);
-        M5.Display.setCursor(x, y);
-        M5.Display.printf("%u:", (unsigned)i);
-
-        // Preview the slot's content, or "(empty)" in dim grey when
-        // the slot has no text yet. The preview is clamped to kMaxText
-        // chars to keep both columns aligned.
-        M5.Display.setCursor(x + kDigitW + 4, y);
-        const char* txt = model.getMemory(i);
-        if (!txt || txt[0] == '\0') {
-            M5.Display.setTextColor(0x7384);
-            M5.Display.print("(empty)");
-        } else {
-            M5.Display.setTextColor(COLOR_FG);
-            for (int j = 0; j < kMaxText && txt[j] != '\0'; ++j) {
-                M5.Display.print(txt[j]);
-            }
-        }
+    // Content line — size 3 (24x48 px). White FG for populated slots,
+    // red WARN for empty slots so the operator notices they need to
+    // fill it. Long memories are truncated to 20 chars + a `>`
+    // chevron — textWidth() at size 3 is ~24 px per glyph, so 20 chars
+    // is roughly the row width.
+    constexpr size_t kMaxPreview = 20;
+    M5.Display.setTextSize(3);
+    M5.Display.setTextColor(empty ? COLOR_WARN : COLOR_FG);
+    M5.Display.setCursor(0, MAIN_Y + 28);
+    if (empty) {
+        M5.Display.print("(empty)");
+    } else {
+        size_t n = 0;
+        while (n < kMaxPreview && txt[n] != '\0') ++n;
+        const bool truncated = (txt[n] != '\0');
+        for (size_t i = 0; i < n; ++i) M5.Display.print(txt[i]);
+        if (truncated) M5.Display.print('>');
     }
 
-    // Hint row
-    M5.Display.setFont(nullptr);
+    // Hint row — bottom of the screen, dim grey, size 1. Split into two
+// lines so the X-clear key and the ESC-back key both fit. Y positions
+// 100 and 116 are within the 240x135 panel (status bar 20 px, content
+// area ends ~y=132).
     M5.Display.setTextSize(1);
     M5.Display.setTextColor(0x7384);
-    M5.Display.setCursor(0, MAIN_Y + 110);
-    M5.Display.print("0-9: pick   ESC: back");
+    M5.Display.setCursor(0, MAIN_Y + 100);
+    M5.Display.print("0-9: switch   ENTER: edit");
+    M5.Display.setCursor(0, MAIN_Y + 116);
+    M5.Display.print("X: clear      ESC: back");
 }
 
 void CardputerDisplay::showMemoryEdit(MorseModel& model) {

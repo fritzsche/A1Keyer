@@ -53,8 +53,10 @@ Sections 1–4 are operator-facing; sections 5–10 are developer-facing.
 | Keystroke | From | Action |
 |---|---|---|
 | `0`..`9` | DECODER | Play slot N. Empty slots are no-ops. |
-| `M` | DECODER | Open the memory-keyer picker (`MEMORY_PICK`). |
-| `0`..`9` | MEMORY_PICK | Pick slot N, open the editor pre-filled with the slot's text. |
+| `M` | DECODER | Open the memory-keyer picker (`MEMORY_PICK`). Cursor lands on slot 0. |
+| `0`..`9` | MEMORY_PICK | Switch the shown slot to N. Stays on `MEMORY_PICK`. |
+| `X` / `x` | MEMORY_PICK | Clear the currently shown slot and persist. Stays on `MEMORY_PICK`. |
+| `Enter` | MEMORY_PICK | Open the editor (`MEMORY_EDIT`) pre-filled with the currently shown slot. |
 | `Esc` | MEMORY_PICK | Cancel, return to DECODER. |
 | `0`..`9` | MEMORY_EDIT | Type the digit into the buffer (digits are valid CW text). |
 | `,` | MEMORY_EDIT | Move cursor left. |
@@ -65,13 +67,26 @@ Sections 1–4 are operator-facing; sections 5–10 are developer-facing.
 | `M` | MEMORY_PICK / MEMORY_EDIT | Ignored (no nesting). |
 | `P` | MEMORY_PICK / MEMORY_EDIT | Ignored — typing P inside a memory must not fire the "Hello Morse!" demo. The P-key still works from DECODER. |
 
-### 2.2 Switching slots
+### 2.2 Switching slots and committing
 
-To edit a different slot, ESC back to `MEMORY_PICK` and press the new
-digit. Pressing a digit inside `MEMORY_EDIT` types the digit into the
-buffer — it does not switch slots. Digits are common in CW text
-(`5NN`, `599`, contest exchanges) and an accidental slot switch would
-overwrite in-progress edits.
+Switching slots is a picker-only action: press `0`..`9` while on
+`MEMORY_PICK` to bring a different slot to the front. The screen
+re-renders with the new slot's text. Digits do **not** commit you into
+the editor — you stay on `MEMORY_PICK` until you press `Enter`.
+
+The full "edit a slot" flow is therefore:
+
+1. From `DECODER`, press `M`.
+2. Press `0`..`9` to position the cursor on the slot to edit (or
+   accept the default slot 0).
+3. Press `Enter` to open `MEMORY_EDIT` for that slot.
+4. Edit the buffer; press `Enter` to commit, or `Esc` to discard.
+
+Pressing a digit inside `MEMORY_EDIT` types the digit into the buffer
+— it does not switch slots. Digits are common in CW text (`5NN`, `599`,
+contest exchanges) and an accidental slot switch would overwrite
+in-progress edits. To edit a different slot, `Esc` (or commit) back to
+`DECODER` and re-enter the picker.
 
 ### 2.3 Playback-when-busy
 
@@ -268,13 +283,20 @@ See § 6.3 for the cross-core-safety argument and § 8 for risks.
 
 Two new `DisplayScreen` values drive the editor:
 
-- `MEMORY_PICK` — opens after `M` from DECODER. Shows all ten slots in
-  a 5×2 grid with a short preview of each ("CQ CQ DE W" or "(empty)").
-  The next keystroke (digit) advances to the editor.
-- `MEMORY_EDIT` — opens after a digit is pressed in `MEMORY_PICK`.
-  Renders the `TextInput` control (the same widget used by the Wi-Fi
-  passphrase screen), masked by default, pre-filled with the slot's
-  persisted text.
+- `MEMORY_PICK` — opens after `M` from DECODER. Single-slot view: a
+  large-font rendering of one slot's text (or `(empty)` in red), with
+  a `"Memory N"` size-2 title in accent (the slot number is part of
+  the title — there is no separate right-aligned badge), and a two-line
+  hint row at the bottom listing `0-9: switch  ENTER: edit` and
+  `X: clear  ESC: back`. The cursor slot is held in
+  `MorseModel::_memoryPickSlot`; pressing `0`..`9` swaps to a
+  different slot without leaving the screen, `X`/`x` clears the
+  current slot and persists it, and `Enter` advances to `MEMORY_EDIT`
+  for the currently shown slot.
+- `MEMORY_EDIT` — opens after `Enter` is pressed in `MEMORY_PICK`
+  (cursor-target determines which slot). Renders the `TextInput`
+  control (the same widget used by the Wi-Fi passphrase screen), masked
+  by default, pre-filled with the slot's persisted text.
 
 ### 5.2 Editor reuse
 
@@ -307,9 +329,28 @@ written to the model on commit. The behaviour:
 
 | Gesture | Effect on `_memory[slot]` | Effect on NVS |
 |---|---|---|
-| Enter | Buffer copied to slot | Bank saved |
-| Esc | Unchanged | Unchanged |
-| Digit pivot | Previous slot unchanged | Previous slot unchanged; new slot is the new target (still unchanged unless the operator types + Enters) |
+| Enter (in editor) | Buffer copied to slot | Bank saved |
+| Esc (in editor) | Unchanged | Unchanged |
+| Digit (in picker) | Unchanged | Unchanged — digit only moves the cursor, it does not commit |
+| X / x (in picker) | Slot set to `""` | Bank saved |
+| Enter (in picker) | Unchanged — picks the cursor into the editor | Unchanged until the operator commits from the editor |
+
+The picker keeps its own cursor: `_memoryPickSlot` is reset to `-1`
+when committing from or discarding the editor, and reset to `0` when
+the operator re-opens the picker from DECODER. `X`/`x` clearing does
+**not** reset the cursor — the operator stays on the same slot and
+sees the red `(empty)` placeholder, ready to press `Enter` and type
+fresh content.
+
+#### 5.3.1 Held-Enter priming
+
+When transitioning from `MEMORY_PICK` to `MEMORY_EDIT`, both
+`TextInput::primePrintableHeld()` and `TextInput::primeEnterHeld()`
+must be called after `setValue()`. Without the Enter prime, the still-
+held Enter key would auto-commit on the editor's first `feed()` tick —
+the operator would briefly transition into `MEMORY_EDIT` and then
+immediately bounce back to `DECODER` without ever seeing the editor.
+This mirrors the same priming pattern in the Wi-Fi password flow.
 
 ### 5.5 Caps lock
 
@@ -576,62 +617,72 @@ Tab5 doesn't apply.
 
 1. **Cold-boot with empty NVS:** powers up into DECODER with no error.
    Pressing each digit is silent.
-2. **Edit a memory:** press `M` → screen shows "Memory / Pick slot
-   (0-9)" with all ten slots listed as `(empty)`. Press `3`. Editor
-   opens with title "Mem 3", empty, cursor at column 0. Type `CQ CQ DE
-   W1AW K`. Press Enter. Returns to DECODER. Serial log shows
-   `[MEM] saved m3="CQ CQ DE W1AW K"`.
-3. **Re-edit (pre-fill):** press `M` → `3`. Editor pre-fills with
-   `CQ CQ DE W1AW K`, cursor at end. Press Enter without changes —
-   same value resaved.
-4. **Slot pivot inside editor:** from `MEMORY_EDIT` of slot 3, press
-   `5`. Editor swaps to slot 5's content (empty if unset). Cursor
-   lands at end of pre-filled text (or 0 if empty).
-5. **ESC aborts without saving:** press `M` → `3`, type something,
+2. **Edit a memory (default slot):** press `M` → picker opens with title
+   `Memory 0` in accent, `(empty)` in red at size 3. Press `Enter`
+   (no digit first). **Editor opens and stays open** — the held Enter
+   must not auto-commit on entry (regression for the primeEnterHeld
+   bug — see § 5.3.1). Type `CQ CQ DE W1AW K`. Press Enter. Returns to
+   DECODER. Serial log shows `[MEM] saved m0="CQ CQ DE W1AW K"`.
+3. **Re-edit a slot (pre-fill):** press `M` → picker opens with title
+   `Memory 0`. Press `3` to switch the picker to slot 3 (no transition
+   to the editor, title updates to `Memory 3`). Press `Enter`. Editor
+   opens for slot 3, pre-fills with `CQ CQ DE W1AW K`, cursor at end.
+   Press Enter without changes — same value resaved.
+4. **Digit in picker only switches slot:** from `MEMORY_PICK` of slot 3,
+   press `5`. Title updates to `Memory 5`; picker re-renders showing
+   slot 5's contents (or `(empty)`). Stay on `MEMORY_PICK`. Press
+   Enter — editor opens for slot 5, not slot 3.
+5. **Clear a slot with X:** from `MEMORY_PICK` of a slot that has
+   content (e.g. slot 3 with `CQ CQ DE W1AW K`), press `x`. Slot
+   content is wiped, picker re-renders with `(empty)` in red, title
+   stays `Memory 3`. Serial log shows `[MEM] cleared m3`. Press
+   `Enter` — editor opens empty, ready for fresh content. Verify
+   persistence with power-cycle.
+6. **ESC aborts without saving:** press `M` → `3`, type something,
    ESC. Returns to DECODER. Slot 3 unchanged.
-6. **Playback through sidetone + radio:** enable `KEYING` (`K` then
+7. **Playback through sidetone + radio:** enable `KEYING` (`K` then
    `;` for On). Press digit `3` from DECODER. Hear the stored CQ
    through the speaker **and** see GPIO4 (EXT header G4) HIGH during
    each dit/dah on a scope/LED probe.
-7. **Playback with host echo (no radio):** turn `KEYING` off, connect a
+8. **Playback with host echo (no radio):** turn `KEYING` off, connect a
    host (RUMlogNG / N1MM / `wk2ping`), open the WinKey session. Press
    digit `3`. The host's outgoing-CW field populates byte-by-byte.
-8. **Playback when busy:** press `3`, then immediately press `4` while
+9. **Playback when busy:** press `3`, then immediately press `4` while
    memory 3 is still playing. The second press is ignored; memory 3
    continues uninterrupted.
-9. **Empty slot is a no-op:** press a digit whose slot is empty.
-   Nothing plays, no error.
-10. **Arm timeout / ESC:** press `M`, then ESC. Returns to DECODER
+10. **Empty slot is a no-op:** press a digit whose slot is empty.
+    Nothing plays, no error.
+11. **Arm timeout / ESC:** press `M`, then ESC. Returns to DECODER
     without entering the editor.
-11. **P-key still works:** press `P` from DECODER. Hears "Hello
+12. **P-key still works:** press `P` from DECODER. Hears "Hello
     Morse!" through the speaker. With `KEYING` enabled, GPIO4 also
     keys during each dit/dah (new behaviour, expected per § 8.1).
-12. **Persistence:** power-cycle. Press `3` — stored CQ plays again.
+13. **Persistence:** power-cycle. Press `3` — stored CQ plays again.
 
-13. **Cancel-on-any-keypress — paddle held suppresses keying:** press
+14. **Cancel-on-any-keypress — paddle held suppresses keying:** press
     `3` to start memory 3 (GPIO4 toggling). Press the DIT paddle
     mid-element → playback stops immediately, sidetone cuts off, GPIO4
     returns LOW. **GPIO4 must stay LOW for the entire duration the
     paddle remains held.** No element completes after the cancel.
-14. **Cancel-on-any-keypress — fresh press after release is real:**
-    continue from #13 with paddle still held (GPIO4 LOW). Release the
+15. **Cancel-on-any-keypress — fresh press after release is real:**
+    continue from #14 with paddle still held (GPIO4 LOW). Release the
     paddle → GPIO4 stays LOW (no spurious re-key on release). Press
     the DIT paddle again → a real dit plays (sidetone blip, GPIO4
     HIGH for one dit-length).
-15. **Cancel-on-any-keypress — held P cancels itself:** press `P` to
+16. **Cancel-on-any-keypress — held P cancels itself:** press `P` to
     start "Hello Morse!". Hold `P` through playback → playback stops
     on the first held tick. Subsequent held ticks produce no
     restart. Release `P`, press `P` again → "Hello Morse!" plays once.
-16. **Cancel-on-any-keypress — held W opens no overlay:** press `P` to
+17. **Cancel-on-any-keypress — held W opens no overlay:** press `P` to
     play "Hello Morse!". Press `W` mid-playback → playback stops;
     `WPM_SETTINGS` does **not** appear. Release `W`, press `W` again →
     `WPM_SETTINGS` opens.
-17. **Cancel-on-any-keypress — held digit does not start a memory:**
+18. **Cancel-on-any-keypress — held digit does not start a memory:**
     press `P` to play "Hello Morse!". Press `2` mid-playback →
     playback stops; slot 2 does not start playing (the busy gate
     prevented the start; the cancel gate consumed the press).
     Release `2`, press `2` again → slot 2 plays.
-18. **Cancel-on-any-keypress — squeeze suppressed until both released:**
+19. **Cancel-on-any-keypress — squeeze suppressed until both released:**
     press `P` to play "Hello Morse!". Squeeze both DIT and DAH
     paddles → playback stops; GPIO4 LOW. Release DIT only, keep DAH
     held → GPIO4 still LOW. Release DAH → GPIO4 still LOW. Press DIT
