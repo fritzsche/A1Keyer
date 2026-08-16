@@ -36,6 +36,8 @@ struct CardputerKeyState {
     bool enter     = false;
     bool backspace = false;
     bool escape    = false;
+    bool left      = false;  ///< Fn + , on Cardputer (native keyboard fn-layer, KEY_LEFT)
+    bool right     = false;  ///< Fn + / on Cardputer (native keyboard fn-layer, KEY_RIGHT)
     char printable = 0;      ///< first printable ASCII held, else 0
 };
 

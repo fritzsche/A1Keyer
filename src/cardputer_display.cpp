@@ -600,15 +600,20 @@ void CardputerDisplay::showWifiPasswordInput(MorseModel& model) {
         M5.Display.fillRect(cx, kBoxY + 6, 2, kBoxH - 12, COLOR_FG);
     }
 
-    // Hint row — kept at size 1 because the longer string with all
-    // four gestures (commit, cursor, show, back) overflows at size 2.
-    // Placed ~10 px below the input box (which ends at MAIN_Y+70=90)
-    // so the bottom of the screen stays visible on the 135 px LCD.
+    // Hint rows — kept at size 1 because the longer string with all
+    // five gestures (commit, cursor-left, cursor-right, show, back)
+    // overflows at size 2. Cursor navigation now requires Fn to be
+    // held, so the ',' and '/' punctuation types as ordinary text
+    // without it (CW macros routinely contain '/'). Two lines fit
+    // between the input box (which ends at MAIN_Y+70=90) and the
+    // bottom edge of the 135 px LCD.
     M5.Display.setFont(nullptr);
     M5.Display.setTextSize(1);
     M5.Display.setTextColor(0x7384);
-    M5.Display.setCursor(0, MAIN_Y + 80);
-    M5.Display.print("ENTER ok  ,/:cur  FN show  ESC bk");
+    M5.Display.setCursor(0, MAIN_Y + 78);
+    M5.Display.print("ENTER ok   FN , left  FN / right");
+    M5.Display.setCursor(0, MAIN_Y + 94);
+    M5.Display.print("FN show             ESC bk");
 }
 
 void CardputerDisplay::showWifiNetworkInfo(MorseModel& model) {
@@ -831,15 +836,18 @@ void CardputerDisplay::showMemoryEdit(MorseModel& model) {
 
     // Hint rows — no FN show (the field is never masked), no
     // "0-9: switch" (digits type as text inside the editor; switching
-    // slots requires ESC back to MEMORY_PICK). Two compact lines fit
-    // between the box bottom and the screen edge on the 135 px LCD.
+    // slots requires ESC back to MEMORY_PICK). Cursor navigation now
+    // requires Fn to be held, so bare ',' and '/' type as ordinary
+    // text without it (CW macros routinely contain '/'). Two compact
+    // lines fit between the box bottom and the screen edge on the
+    // 135 px LCD.
     M5.Display.setFont(nullptr);
     M5.Display.setTextSize(1);
     M5.Display.setTextColor(0x7384);
     M5.Display.setCursor(0, MAIN_Y + 76);
-    M5.Display.print("ENTER ok  ,/:cur  OPT caps");
+    M5.Display.print("ENTER ok   FN , left  FN / right");
     M5.Display.setCursor(0, MAIN_Y + 92);
-    M5.Display.print("ESC bk");
+    M5.Display.print("OPT caps             ESC bk");
 }
 
 void CardputerDisplay::renderScrollingText(const char* text, size_t textLen, size_t maxVisible) {

@@ -67,6 +67,15 @@ static CardputerKeyState pollKeys() {
     ks.enter     = kb.isKeyPressed(KEY_ENTER);
     ks.backspace = st.backspace;
     ks.escape    = st.esc;
+    // Fn-layer arrows. The keyboard library populates these on the
+    // fn-layer pass (Keyboard.cpp PASS 2) and returns early before
+    // PASS 3, so `word` is empty whenever `fn` is held — that means
+    // ks.printable can NEVER be `,` or `/` while Fn is down, and the
+    // Fn-gated printable detection in handleWifiScreen /
+    // handleMemoryScreen was structurally dead. Read the native
+    // fn-layer flags directly: left = Fn + ,, right = Fn + /.
+    ks.left      = st.left;
+    ks.right     = st.right;
 
     // Use the library's own `word` buffer (already filtered for case by
     // the keyboard reader — see Keyboard.cpp PASS 3 which pushes the
@@ -199,23 +208,25 @@ static void handleWifiScreen(MorseModel& model, const CardputerKeyState& ks) {
             DisplayTask::requestRender();
         }
 
-        // ',' = cursor left, '/' = cursor right. The Cardputer doesn't
-        // expose dedicated arrow keys through CardputerKeyState, so the
-        // bottom-row punctuation acts as navigation. These keys are
-        // claimed BEFORE feed() so the editor doesn't insert them as
-        // text — feed() sees a zeroed printable in that case.
-        static bool wasComma = false, wasSlash = false;
+        // Fn-layer cursor navigation. The Cardputer keyboard library
+        // populates `keysState().left` on Fn + , and `.right` on Fn + /
+// (Keyboard.cpp PASS 2). Because the library returns early on the
+// fn-layer, `word` is empty whenever Fn is held — meaning bare ',' and
+// '/' (without Fn) are always typed as ordinary text. CW macros
+// routinely contain '/' and bare ',' is a legal Morse element, so
+// silently swallowing them would corrupt the operator's contest
+// exchange. The printable is zeroed on the cursor-moved path so
+// feed() does not also insert the punctuation into the buffer.
+        static bool wasLeft = false, wasRight = false;
         TextInput* ti = model.passwordInput();
-        const bool comma = ks.printable == ',';
-        const bool slash = ks.printable == '/';
         if (screenJustChanged) {
-            wasComma = comma; wasSlash = slash;
+            wasLeft = ks.left; wasRight = ks.right;
         }
         bool cursorMoved = false;
-        if (comma && !wasComma) { ti->moveCursor(-1); cursorMoved = true; }
-        if (slash && !wasSlash) { ti->moveCursor(+1); cursorMoved = true; }
-        wasComma = comma;
-        wasSlash = slash;
+        if (ks.left  && !wasLeft)  { ti->moveCursor(-1); cursorMoved = true; }
+        if (ks.right && !wasRight) { ti->moveCursor(+1); cursorMoved = true; }
+        wasLeft  = ks.left;
+        wasRight = ks.right;
 
         CardputerKeyState ksForEditor = ks;
         if (cursorMoved) ksForEditor.printable = 0;
@@ -480,20 +491,27 @@ static void handleMemoryScreen(MorseModel& model, const CardputerKeyState& ks) {
         // overwritten the operator's in-progress edits. To switch
         // slots, ESC back to MEMORY_PICK and press a different digit.
 
-        // ',' / '/' → cursor nav (mirror wifi password handler at
-        // main.cpp:201-220).
-        static bool wasComma = false, wasSlash = false;
+        // Fn-layer cursor navigation (mirror wifi password handler at
+        // main.cpp:201-220). The Cardputer keyboard library populates
+        // `keysState().left` on Fn + , and `.right` on Fn + /
+        // (Keyboard.cpp PASS 2). Because the library returns early on
+        // the fn-layer, `word` is empty whenever Fn is held — meaning
+        // bare ',' and '/' (without Fn) are always typed as ordinary
+        // text. CW macros routinely contain '/' and bare ',' is a legal
+        // Morse element, so silently swallowing them would corrupt the
+        // operator's contest exchange. The printable is zeroed on the
+        // cursor-moved path so feed() does not also insert the
+        // punctuation into the buffer.
+        static bool wasLeft = false, wasRight = false;
         TextInput* ti = model.memoryInput();
-        const bool comma = ks.printable == ',';
-        const bool slash = ks.printable == '/';
         if (screenJustChanged) {
-            wasComma = comma; wasSlash = slash;
+            wasLeft = ks.left; wasRight = ks.right;
         }
         bool cursorMoved = false;
-        if (comma && !wasComma) { ti->moveCursor(-1); cursorMoved = true; }
-        if (slash && !wasSlash) { ti->moveCursor(+1); cursorMoved = true; }
-        wasComma = comma;
-        wasSlash = slash;
+        if (ks.left  && !wasLeft)  { ti->moveCursor(-1); cursorMoved = true; }
+        if (ks.right && !wasRight) { ti->moveCursor(+1); cursorMoved = true; }
+        wasLeft  = ks.left;
+        wasRight = ks.right;
 
         CardputerKeyState ksForEditor = ks;
         if (cursorMoved) ksForEditor.printable = 0;

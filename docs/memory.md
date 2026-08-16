@@ -59,8 +59,10 @@ Sections 1–4 are operator-facing; sections 5–10 are developer-facing.
 | `Enter` | MEMORY_PICK | Open the editor (`MEMORY_EDIT`) pre-filled with the currently shown slot. |
 | `Esc` | MEMORY_PICK | Cancel, return to DECODER. |
 | `0`..`9` | MEMORY_EDIT | Type the digit into the buffer (digits are valid CW text). |
-| `,` | MEMORY_EDIT | Move cursor left. |
-| `/` | MEMORY_EDIT | Move cursor right. |
+| `,` | MEMORY_EDIT | Type the comma character. |
+| `/` | MEMORY_EDIT | Type the slash character. |
+| `Fn` + `,` | MEMORY_EDIT | Move cursor left. |
+| `Fn` + `/` | MEMORY_EDIT | Move cursor right. |
 | `OPT` | MEMORY_EDIT | Toggle caps lock (same as the Wi-Fi password screen). |
 | `Enter` | MEMORY_EDIT | Commit, save to NVS, return to DECODER. |
 | `Esc` | MEMORY_EDIT | Discard edits, return to DECODER. |
@@ -317,8 +319,11 @@ code. The renderer (`CardputerDisplay::showMemoryEdit`, modelled on
   view. Walking back left follows the window until it hits the left
   edge, then stays put.
 - A static caret at the cursor column within the visible window.
-- Hint rows: `"0-9: switch  ENTER ok  ,/:cur"` and `"ESC bk"`. No
-  reveal/mask gesture — there is nothing to mask.
+- Hint rows: `"ENTER ok   FN , left  FN / right"` and
+  `"OPT caps             ESC bk"`. No reveal/mask gesture — there is
+  nothing to mask. Bare `,` and `/` are typed as ordinary text
+  (CW macros routinely contain `/`); cursor navigation requires `Fn`
+  to be held.
 
 ### 5.3 Commit vs. cancel
 
@@ -513,7 +518,7 @@ correctly — is covered by `test_morse_generator` and
   math, same hint row layout.
 - `main.cpp:95` (`handleWifiScreen`) is the template for
   `main.cpp` `handleMemoryScreen` — same screen-local edge detection,
-  same OPT caps-lock wiring, same `,` / `/` cursor nav.
+  same OPT caps-lock wiring, same Fn-gated `,` / `/` cursor nav.
 
 ---
 
