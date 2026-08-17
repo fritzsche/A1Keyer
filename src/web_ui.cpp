@@ -33,6 +33,7 @@
 #include "network_manager.h"
 #include "memory_store.h"
 #include "Log.h"
+#include "winkey.h"
 
 // Forward declaration for the inline HTML asset defined at file scope
 // near the bottom of this file. File-scope declaration so the linker
@@ -423,6 +424,38 @@ void handleApiMemory() {
     server.send(saved ? 200 : 500, "application/json", String(reply, n));
 }
 
+// POST /api/play — playback of one memory slot via the same path the
+// keyboard's digit-0..9 handler uses (src/main.cpp:940-961). Returns
+// { ok:true, slot } on success, { ok:false, error } on bad input.
+void handleApiPlay() {
+    auto& server = HttpServer::server();
+    if (server.method() != HTTP_POST) {
+        server.send(405, "application/json", "{\"ok\":false,\"error\":\"method not allowed\"}");
+        return;
+    }
+    if (!server.hasArg("plain")) {
+        server.send(400, "application/json", "{\"ok\":false,\"error\":\"missing body\"}");
+        return;
+    }
+    String raw = server.arg("plain");
+    ParsedBody body;
+    const char* p = raw.c_str();
+    parseObject(&p, body);
+    if (!body.hasSlot || body.slot < 0 || body.slot >= (int)MorseModel::kMemSlots) {
+        server.send(400, "application/json", "{\"ok\":false,\"error\":\"slot must be 0..9\"}");
+        return;
+    }
+    const char* text = MorseModel::instance().getMemory((uint8_t)body.slot);
+    if (!text || text[0] == '\0') {
+        server.send(400, "application/json", "{\"ok\":false,\"error\":\"slot empty\"}");
+        return;
+    }
+    Winkey::playLocalMemoryText(text);
+    char reply[64];
+    int n = snprintf(reply, sizeof(reply), "{\"ok\":true,\"slot\":%d}", body.slot);
+    server.send(200, "application/json", String(reply, n));
+}
+
 }  // namespace
 
 void WebUI::begin(uint16_t port) {
@@ -431,6 +464,7 @@ void WebUI::begin(uint16_t port) {
     addRoute((uint16_t)HTTP_GET,  "/",             handleRoot);
     addRoute((uint16_t)HTTP_POST, "/api/settings", handleApiSettings);
     addRoute((uint16_t)HTTP_POST, "/api/memory",   handleApiMemory);
+    addRoute((uint16_t)HTTP_POST, "/api/play",     handleApiPlay);
 }
 
 void WebUI::poll() {
@@ -481,9 +515,10 @@ main{max-width:1100px;margin:0 auto;padding:16px;display:grid;
   border-radius:10px;padding:14px 16px}
 .card h2{margin:0 0 10px;font-size:15px;font-weight:600;color:var(--fg);
   letter-spacing:.02em;text-transform:uppercase}
-pre#decoded{margin:0;padding:12px;background:var(--bg);border:1px solid var(--border);
-  border-radius:6px;color:var(--fg);font:14px/1.4 ui-monospace,Menlo,Consolas,monospace;
-  white-space:pre-wrap;word-break:break-all;max-height:200px;overflow:auto}
+pre#decoded{margin:0;padding:10px 12px;background:var(--bg);border:1px solid var(--border);
+  border-radius:6px;color:var(--fg);font:20px/1.4 ui-monospace,Menlo,Consolas,monospace;
+  white-space:nowrap;overflow-x:auto;overflow-y:hidden;
+  -webkit-overflow-scrolling:touch;scroll-behavior:smooth}
 form{display:grid;gap:12px}
 .row{display:grid;gap:6px}
 .row label{display:flex;justify-content:space-between;align-items:center;font-size:13px;color:var(--muted)}
@@ -501,8 +536,9 @@ button{min-height:44px;padding:8px 14px;background:var(--bg);
 button:hover{border-color:var(--accent)}
 button:active{transform:translateY(1px)}
 button.primary{background:var(--accent);color:#0e1116;border-color:var(--accent);font-weight:600}
-.mem{display:grid;grid-template-columns:54px 1fr auto;gap:8px;align-items:center;
+.mem{display:grid;grid-template-columns:54px 1fr auto auto;gap:8px;align-items:center;
   margin-bottom:8px}
+.mem button{min-width:64px}
 .mem label{font-weight:600;color:var(--muted)}
 .banner{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);
   background:var(--err);color:#fff;padding:10px 14px;border-radius:6px;
@@ -606,7 +642,9 @@ button.primary{background:var(--accent);color:#0e1116;border-color:var(--accent)
     patchValue($("winkey"), String(!!s.winkeyMode));
     var dec = $("decoded");
     if (dec.textContent !== s.decoded) dec.textContent = s.decoded || "";
-    dec.scrollTop = dec.scrollHeight;
+    // Single-line preview — newest chars are appended to the right,
+    // so keep the rightmost content in view.
+    dec.scrollLeft = dec.scrollWidth;
     renderMemory(s.memory || []);
     var wifi = $("wifi");
     if (s.wifiIP && s.wifiIP !== "0.0.0.0"){
@@ -633,16 +671,30 @@ button.primary{background:var(--accent);color:#0e1116;border-color:var(--accent)
         var inp = document.createElement("input");
         inp.type = "text"; inp.maxLength = 80; inp.id = "mem-" + i;
         inp.value = arr[i] || "";
+        var play = document.createElement("button");
+        play.type = "button";
+        play.textContent = "▶";
+        play.title = "Play M" + i;
+        play.dataset.playSlot = i;
+        if (!arr[i]) play.disabled = true;
         var btn = document.createElement("button");
+        btn.type = "button";
         btn.textContent = "Save";
         btn.dataset.slot = i;
-        row.appendChild(lbl); row.appendChild(inp); row.appendChild(btn);
+        row.appendChild(lbl); row.appendChild(inp);
+        row.appendChild(play); row.appendChild(btn);
         list.appendChild(row);
       }
     } else {
       for (var j = 0; j < need; j++){
         var f = $("mem-" + j);
         if (f && f.value !== (arr[j] || "")) f.value = arr[j] || "";
+        // Update the play button's disabled state to match the slot content.
+        var rows = list.children;
+        if (rows && rows[j]) {
+          var btns = rows[j].querySelectorAll("button");
+          if (btns.length >= 1) btns[0].disabled = !arr[j];
+        }
       }
     }
   }
@@ -708,6 +760,27 @@ button.primary{background:var(--accent);color:#0e1116;border-color:var(--accent)
     $("memList").addEventListener("click", function(ev){
       var t = ev.target;
       if (t.tagName !== "BUTTON") return;
+
+      // Play button (▶) — fire-and-forget POST to /api/play.
+      if (t.dataset.playSlot !== undefined) {
+        var pslot = parseInt(t.dataset.playSlot, 10);
+        if (isNaN(pslot)) return;
+        var prev = t.textContent;
+        t.disabled = true;
+        t.textContent = "…";
+        postJson("/api/play", {slot: pslot}).then(function(res){
+          t.disabled = false;
+          t.textContent = prev;
+          if (!res.ok) showBanner("Play failed (HTTP " + res.status + ")");
+        }).catch(function(){
+          t.disabled = false;
+          t.textContent = prev;
+          showBanner("Play failed — device offline?");
+        });
+        return;
+      }
+
+      // Save button.
       var slot = parseInt(t.dataset.slot, 10);
       var input = $("mem-" + slot);
       if (!input) return;
