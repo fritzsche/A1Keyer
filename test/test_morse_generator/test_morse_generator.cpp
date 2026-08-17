@@ -558,6 +558,129 @@ static void test_encoder_emits_char_space_between_T_and_U() {
     CHECK(elems[4].keyDown);
 }
 
+// ─── Char tracking across WORD_SPACE (memory playback display bug) ───
+//
+// User-reported: playing back a memory slot containing "CQ CQ …", the
+// device screen and web UI showed "CQ " (a trailing space) while the
+// audio was keying the second C. The encoder emits one WORD_SPACE per
+// ASCII space; the generator's silence branch only advances _charIdx
+// by one position per silence element, so the next mark's branch set
+// _currentChar from a position that still pointed at the space, and
+// the following CHAR_SPACE appended the space instead of 'C' to the
+// model buffer.
+//
+// These tests verify that the mark branch's new skip-spaces guard
+// advances _charIdx past any consecutive spaces before assigning
+// _currentChar, so the right letter gets captured for the boundary.
+
+#include "display_model.h"
+
+static std::string readDecodedText() {
+    auto& m = MorseModel::instance();
+    const size_t tl  = m.decodedTextLen();
+    const size_t tail = m.textTail();
+    std::string out;
+    out.reserve(tl);
+    for (size_t i = 0; i < tl; ++i) {
+        size_t idx = (tail + i) % MorseModel::TEXT_BUF_SIZE;
+        char c = m.textAt(idx);
+        if (c) out.push_back(c);
+    }
+    return out;
+}
+
+static void test_word_boundary_displays_inter_word_space_at_word_boundary() {
+    // "CQ CQ" — the regression case. Before the fix, the second C
+    // was captured as ' ' (a space) and the display read "CQ " with
+    // a trailing space during the second C's audio. The fix appends
+    // the inter-word space at the start of the WORD_SPACE silence
+    // (in sync with the audio gap), so the display now reads "CQ CQ"
+    // with the space between the two words — exactly where the user
+    // expects it.
+    KeyEnvelop env(20, 0.005f, 48000);
+    MorseGenerator gen(&env, 20);
+    MorseModel::instance().clearDecodedText();
+
+    gen.playText("CQ CQ");
+    std::vector<int16_t> buf(256, 0);
+    int maxIter = 4000;
+    while (gen.isPlaying() && maxIter-- > 0)
+        gen.fillSamplesMono(buf.data(), buf.size(), 500.0f, 16384);
+
+    std::string got = readDecodedText();
+    CHECK(got == "CQ CQ");
+}
+
+static void test_leading_multi_space_input() {
+    // "  CQ" — encoder emits two WORD_SPACE elements. The silence
+    // branch appends _currentChar at each WS, and _currentChar is
+    // initialised to _playText[0] (' ') in playText. So both leading
+    // spaces get appended to the decoded buffer, then C and Q are
+    // appended via the normal CS / boundary paths. End state is
+    // "  CQ" (two leading spaces preserved). The skip-spaces fix is
+    // only in the mark branch, so leading-space preservation is
+    // unaffected — the fix must not regress this behaviour.
+    KeyEnvelop env(20, 0.005f, 48000);
+    MorseGenerator gen(&env, 20);
+    MorseModel::instance().clearDecodedText();
+
+    gen.playText("  CQ");
+    std::vector<int16_t> buf(256, 0);
+    int maxIter = 4000;
+    while (gen.isPlaying() && maxIter-- > 0)
+        gen.fillSamplesMono(buf.data(), buf.size(), 500.0f, 16384);
+
+    std::string got = readDecodedText();
+    CHECK(got == "  CQ");
+}
+
+static void test_trailing_space_after_words() {
+    // "CQ CQ " — the trailing WORD_SPACE's append-' ' separator is
+    // suppressed by the peek guard (the trailing space is followed
+    // by nothing, so peek walks past size). The exhausted branch
+    // then appends the trailing space directly. End state is
+    // "CQ CQ " — the inter-word space is shown (fix correctness)
+    // and the trailing space is preserved (unchanged behaviour).
+    KeyEnvelop env(20, 0.005f, 48000);
+    MorseGenerator gen(&env, 20);
+    MorseModel::instance().clearDecodedText();
+
+    gen.playText("CQ CQ ");
+    std::vector<int16_t> buf(256, 0);
+    int maxIter = 4000;
+    while (gen.isPlaying() && maxIter-- > 0)
+        gen.fillSamplesMono(buf.data(), buf.size(), 500.0f, 16384);
+
+    std::string got = readDecodedText();
+    CHECK(got == "CQ CQ ");
+}
+
+static void test_full_memory_playback_appends_in_order() {
+    // The user's reported memory slot: "CQ CQ JJ1QPB/1 JJ1QPB/1".
+    // Decoded text must be appended in the order the audio plays:
+    //   C, Q, ' ', C, Q, ' ', J, J, 1, Q, P, B, /, 1, ' ', J, J, 1, Q, P, B, /, 1
+    // i.e. "CQ CQ JJ1QPB/1 JJ1QPB/1". With the skip-spaces fix
+    // and the WS-append fix, this is what a single playText() call
+    // produces. If the user is seeing spaces shifted one position
+    // to the right, the bug is in the chunked playback path (the
+    // chunked variant plays "CQ " as one chunk, then "CQ " as the
+    // next, with the WS boundary straddling a chunk — the
+    // boundary-prepend interact with the silence branch in a way
+    // the single-chunk path doesn't).
+    KeyEnvelop env(20, 0.005f, 48000);
+    MorseGenerator gen(&env, 20);
+    MorseModel::instance().clearDecodedText();
+
+    gen.playText("CQ CQ JJ1QPB/1 JJ1QPB/1");
+    std::vector<int16_t> buf(1024, 0);
+    int maxIter = 20000;
+    while (gen.isPlaying() && maxIter-- > 0)
+        gen.fillSamplesMono(buf.data(), buf.size(), 500.0f, 16384);
+
+    std::string got = readDecodedText();
+    CHECK(got == "CQ CQ JJ1QPB/1 JJ1QPB/1");
+}
+
 
 int main() {
     printf("=== test_morse_generator ===\n");
@@ -587,5 +710,9 @@ int main() {
     RUN(test_silence_only_text_does_not_wake);
     RUN(test_first_play_after_wpm_change_produces_TU_not_X);
     RUN(test_encoder_emits_char_space_between_T_and_U);
+    RUN(test_word_boundary_displays_inter_word_space_at_word_boundary);
+    RUN(test_leading_multi_space_input);
+    RUN(test_trailing_space_after_words);
+    RUN(test_full_memory_playback_appends_in_order);
     return test_summary();
 }

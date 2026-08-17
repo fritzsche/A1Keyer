@@ -312,9 +312,20 @@ void MorseGenerator::advanceToNextElement() {
         _currentEnvSize = _env->envelopeSize(elType);
         _elRampSamples = static_cast<int>(_env->rampLengthSamples());
         _elTotalSamples = static_cast<int>(_currentEnvSize);
+        // BUGFIX: the encoder emits one WORD_SPACE per ASCII space in the
+        // source text. The silence branch only advances _charIdx by one
+        // position per silence element, so _charIdx can still point at a
+        // space when the next mark starts. Without this skip, _currentChar
+        // would be set to ' ' (a space) instead of the next character, and
+        // the subsequent CHAR_SPACE append would write ' ' instead of the
+        // expected letter to the display — the user saw "CQ " (trailing
+        // space) while the audio was keying the second C of "CQ CQ".
+        while (_charIdx < _playText.size() && _playText[_charIdx] == ' ') {
+            ++_charIdx;
+        }
         // Always update _currentChar to the character whose mark we're playing.
         // This ensures the right char is captured at the boundary.
-        _currentChar = _playText[_charIdx];
+        _currentChar = (_charIdx < _playText.size()) ? _playText[_charIdx] : '\0';
         Log::write("[MG] mark: charIdx=%zu/%zu char='%c'(%d) elType=%d\n",
             (unsigned)_charIdx, _playText.size(),
             (unsigned char)_currentChar >= 32 ? (unsigned char)_currentChar : '?',
@@ -350,6 +361,34 @@ void MorseGenerator::advanceToNextElement() {
                     (unsigned char)_currentChar >= 32 ? (unsigned char)_currentChar : '?',
                     (unsigned)_charIdx, _playText.size());
                 MorseModel::instance().appendDecodedChar(_currentChar, true);
+                // For WORD_SPACE, append the inter-word space separator
+                // so the device / web UI display shows the gap during
+                // the WS silence — in sync with the audio gap. Without
+                // this, the space only appears after the next word's
+                // audio (the mark branch reassigns _currentChar to the
+                // next char, the next CHAR_SPACE picks up the space,
+                // and the user sees the space land one word late).
+                //
+                // Two guards keep the leading/trailing-space behaviour
+                // unchanged:
+                //   - _currentChar != ' '   : leading-space WS shouldn't
+                //                              count as a word boundary.
+                //   - peek past trailing spaces : the WS at the end of
+                //                              the source is followed by
+                //                              only spaces (or nothing);
+                //                              those trailing spaces are
+                //                              appended by the exhausted
+                //                              branch below.
+                if (el.type == MorseEncoder::Element::WORD_SPACE
+                    && _currentChar != ' ') {
+                    size_t peek = _charIdx + 1;
+                    while (peek < _playText.size() && _playText[peek] == ' ') {
+                        ++peek;
+                    }
+                    if (peek < _playText.size()) {
+                        MorseModel::instance().appendDecodedChar(' ', true);
+                    }
+                }
                 ++_charIdx;
                 _currentChar = _playText[_charIdx];
             }
