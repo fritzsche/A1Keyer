@@ -1,15 +1,21 @@
 /**
- * console_server.cpp — dev-only HTTP console for state + log tail.
+ * console_server.cpp — JSON snapshot + log tail endpoints.
  *
- * See console_server.h. Body is `#if ENABLE_WIFI_DEBUG`; when the flag
- * is off the WebServer library is not pulled in and shipping firmware
- * has no networking stack beyond what WiFiDebug brings (and WiFiDebug
- * is also gated, so a default build has nothing at all).
+ * Routes are registered on the shared WebServer (`http_server.h`),
+ * which also serves the on-device web UI from `web_ui.cpp`. Body is
+ * `#if ENABLE_WIFI_DEBUG`; when the flag is off the WebServer library
+ * is not pulled in and shipping firmware has no networking stack.
  *
- * JSON is built with snprintf into Arduino String — keeps the dep
- * footprint small (no ArduinoJson). Output sizes are bounded by the
- * number of decoded-text chars (≤200) and a fixed set of numeric
- * fields; String reallocations are rare and cheap on ESP32-S3.
+ * JSON is built with snprintf into Arduino String — keeps the
+ * dependency footprint small (no ArduinoJson). Output sizes are
+ * bounded by the number of decoded-text chars (≤200) and a fixed set
+ * of numeric fields; String reallocations are rare and cheap on
+ * ESP32-S3.
+ *
+ * Lazy start/stop is driven by `HttpServer::poll()`, called from the
+ * loop. `ConsoleServer::poll()` is a no-op hook kept for symmetry
+ * with `WebUI::poll()` and to leave the call site in main.cpp
+ * unchanged in shape.
  */
 #include "console_server.h"
 
@@ -18,6 +24,7 @@
 #include <Arduino.h>
 #include <WebServer.h>
 #include "network_manager.h"
+#include "http_server.h"
 #include "console_io.h"
 #include "display_model.h"
 #include "winkey.h"
@@ -27,11 +34,9 @@
 #include "audio_engine.h"
 #include "key_event_bus.h"
 #include "log_ring.h"
+#include "memory_store.h"
 
 namespace {
-
-WebServer _server(80);
-bool _started = false;
 
 // jsonEscape — append src to dst with JSON-string escaping.
 // Avoids std::string to keep the dependency footprint minimal.
@@ -57,81 +62,20 @@ void jsonEscape(String& dst, const char* src) {
     }
 }
 
-// ─── GET / — minimal HTML status page ─────────────────────────────────
-void handleRoot() {
-    const auto& m  = MorseModel::instance();
-    const uint32_t ip = WifiMgr::localIP();
-    char  ipStr[20];
-    snprintf(ipStr, sizeof(ipStr), "%u.%u.%u.%u",
-             (unsigned)(ip >> 24), (unsigned)(ip >> 16),
-             (unsigned)(ip >> 8),  (unsigned)(ip));
-
-    String body;
-    body.reserve(1024);
-    body += F("<!doctype html><html><head><meta charset=utf-8>"
-              "<title>A1Keyer</title>"
-              "<style>body{font-family:monospace;margin:1em}"
-              "pre{background:#f4f4f4;padding:0.5em}"
-              "h1{font-size:1.2em}</style></head><body>"
-              "<h1>A1Keyer — dev console</h1>"
-              "<p>State and log endpoints live at "
-              "<code>/state</code> and <code>/log?n=N</code>.</p>"
-              "<pre id=s>");
-
-    char line[160];
-    const char* modeStr = (m.mode() == KeyerMode::ENCODER) ? "ENCODER" : "KEYER";
-    const char* keyerStr = (m.keyerType() == KeyerType::PADDLE) ? "paddle" : "straight";
-    snprintf(line, sizeof(line),
-             "WiFi IP    : %s\n"
-             "WPM        : %d\n"
-             "Frequency  : %.0f Hz\n"
-             "Volume     : %d%%\n"
-             "Keyer mode : %s\n"
-             "Keyer type : %s\n"
-             "Radio key  : %s (keyed=%s)\n"
-             "WinKey mode: %s\n"
-             "Encoder ch : '%c'\n",
-             ipStr,
-             m.wpm(),
-             m.frequency(),
-             m.volume(),
-             modeStr,
-             keyerStr,
-             m.radioKeyingEnabled() ? "ON" : "off",
-             RadioKeyer::isKeyed()   ? "YES" : "no",
-             m.winkeyMode()          ? "WK2" : "Console",
-             m.encoderChar() ? m.encoderChar() : ' ');
-    body += line;
-
-    if (const WinkeyBridge* wk = Winkey::bridge()) {
-        snprintf(line, sizeof(line),
-                 "WK host open: %s\n"
-                 "WK WPM      : %d\n"
-                 "WK sidetone : %d Hz\n"
-                 "WK keyerMode: %u\n",
-                 wk->isOpen()       ? "yes" : "no",
-                 wk->wpm(),
-                 wk->sidetoneHz(),
-                 (unsigned)wk->keyerMode());
-        body += line;
-    }
-
-    body += F("</pre><p><a href='/state'>/state</a> &middot; "
-              "<a href='/log?n=20'>/log?n=20</a></p>"
-              "</body></html>");
-    _server.send(200, "text/html", body);
-}
-
-// ─── GET /state — JSON snapshot of every observable piece of state ──
+// ─── GET /state — JSON snapshot of every observable piece of state ───
+//
+// Schema is additive: existing fields stay; the decoded-text tail was
+// bumped from 50 to TEXT_BUF_SIZE (=200) and the full 10-slot memory
+// bank was added so the web UI can render without an extra round-trip.
 void handleState() {
     const auto& m  = MorseModel::instance();
     const WinkeyBridge* wk = Winkey::bridge();
 
-    // Decoded text: last min(textLen, 50) characters, oldest first.
+    // Decoded text: full ring buffer, oldest first.
     String decoded;
-    decoded.reserve(64);
+    decoded.reserve(MorseModel::TEXT_BUF_SIZE + 16);
     const size_t tl = m.decodedTextLen();
-    const size_t want = 50;
+    const size_t want = MorseModel::TEXT_BUF_SIZE;
     const size_t start = (tl > want) ? (tl - want) : 0;
     const size_t tail  = m.textTail();
     for (size_t i = start; i < tl; ++i) {
@@ -146,7 +90,7 @@ void handleState() {
              ip[0], ip[1], ip[2], ip[3]);
 
     String body;
-    body.reserve(1024);
+    body.reserve(2048);
     body += '{';
 
     body += "\"wpm\":";              body += m.wpm();
@@ -172,57 +116,54 @@ void handleState() {
     }
 
     body += ",\"decoded\":\"";       jsonEscape(body, decoded.c_str()); body += '"';
+
+    // Memory bank: all 10 slots, JSON-escaped, oldest to newest.
+    body += ",\"memory\":[";
+    for (uint8_t i = 0; i < kMemSlots; ++i) {
+        if (i > 0) body += ',';
+        body += '"';
+        jsonEscape(body, m.getMemory(i));
+        body += '"';
+    }
+    body += ']';
+
     body += '}';
 
-    _server.send(200, "application/json", body);
+    HttpServer::server().send(200, "application/json", body);
 }
 
 // ─── GET /log?n=N — JSON array of recent log lines ────────────────────
 void handleLog() {
-    if (!_server.hasArg("n")) {
-        _server.send(400, "application/json", "{\"error\":\"missing n\"}");
+    auto& server = HttpServer::server();
+    if (!server.hasArg("n")) {
+        server.send(400, "application/json", "{\"error\":\"missing n\"}");
         return;
     }
-    long n = _server.arg("n").toInt();
+    long n = server.arg("n").toInt();
     if (n < 1)   n = 1;
     if (n > 200) n = 200;
 
     std::string json = LogRing::instance().snapshotLines((size_t)n);
-    _server.send(200, "application/json", json.c_str());
+    server.send(200, "application/json", json.c_str());
 }
 
 }  // namespace
 
 void ConsoleServer::begin(uint16_t port) {
-    // Bind the routes once. The HTTP listener itself starts lazily from
-    // poll() once WifiMgr reports connected, because WiFi.begin() is
-    // non-blocking and the link is rarely up by setup() exit. Calling
-    // _server.begin() here would freeze a no-listener state that never
-    // recovers — the next loop tick would skip the start gate because
-    // isConnected() is still false.
+    // Routes are registered on the shared WebServer. `HttpServer::begin()`
+    // does the lazy listener start; this method just binds the dev
+    // console endpoints that the on-device web UI also depends on
+    // (the /state JSON snapshot is what populates the settings card).
     (void)port;
-    if (_started) return;
-    _server.on("/",            HTTP_GET, handleRoot);
-    _server.on("/state",       HTTP_GET, handleState);
-    _server.on("/log",         HTTP_GET, handleLog);
-    _started = true;
+    using namespace HttpServer;
+    addRoute((uint16_t)HTTP_GET, "/state", handleState);
+    addRoute((uint16_t)HTTP_GET, "/log",   handleLog);
 }
 
 void ConsoleServer::poll() {
-    // Lazy start: begin the listener on the first tick after the Wi-Fi
-    // link comes up. Safe to call _server.begin() repeatedly on the
-    // WebServer library — it is idempotent. The disconnected edge stops
-    // the listener so it does not advertise a stale IP via mDNS or
-    // respond on a half-torn-down socket.
-    static bool listening = false;
-    if (!listening && _started && WifiMgr::isConnected()) {
-        _server.begin();
-        listening = true;
-    } else if (listening && !WifiMgr::isConnected()) {
-        _server.stop();
-        listening = false;
-    }
-    if (listening) _server.handleClient();
+    // No per-tick work — listener start/stop and handleClient() now
+    // live in `HttpServer::poll()`. Kept as a hook so the call site
+    // in main.cpp doesn't need to change shape.
 }
 
 #else  // ENABLE_WIFI_DEBUG == 0  OR  UNIT_TEST

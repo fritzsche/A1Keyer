@@ -30,7 +30,9 @@
 #if ENABLE_WIFI_DEBUG
 #include <WiFi.h>
 #include "wifi_debug.h"
+#include "http_server.h"
 #include "console_server.h"
+#include "web_ui.h"
 #endif
 #ifdef BOARD_CARDPUTER
 #include "cardputer_display.h"
@@ -1193,11 +1195,13 @@ void setup() {
     }
 
     // Register HTTP routes. The listener itself starts lazily from
-    // ConsoleServer::poll() once WifiMgr reports connected — see
-    // src/console_server.cpp for the lazy-init rationale. Stays
+    // HttpServer::poll() once WifiMgr reports connected — see
+    // src/http_server.cpp for the lazy-init rationale. Stays
     // compiled-out in shipping builds.
 #if ENABLE_WIFI_DEBUG
+    HttpServer::begin();
     ConsoleServer::begin(80);
+    WebUI::begin(80);
 #endif
 }
 
@@ -1213,9 +1217,10 @@ void loop() {
     mirrorWifiState(MorseModel::instance());
 
 #if ENABLE_WIFI_DEBUG
-    // Service the dev network console. No-op when the link is down; the
-    // gate compiles out entirely in shipping builds.
-    ConsoleServer::poll();
+    // Service the HTTP listener and the on-device web UI. No-op when
+    // the link is down; the gate compiles out entirely in shipping builds.
+    HttpServer::poll();
+    WebUI::poll();
 #endif
 
     // Service the WinKeyer stream (host logger → keying), only in WinKey mode.
