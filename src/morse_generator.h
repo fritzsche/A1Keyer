@@ -51,9 +51,27 @@ public:
     /**
      * Start playing a text string as morse code.
      * Non-blocking: playback proceeds asynchronously in fillSamples().
-     * @param text  NUL-terminated string.
+     *
+     * @param text              NUL-terminated string.
+     * @param isContinuation    True if this `text` is a continuation of a
+     *                          chunked playback — i.e. the previous chunk's
+     *                          audio just finished and the encoder does not
+     *                          emit a trailing inter-character silence, so a
+     *                          CHAR_SPACE must be prepended to preserve the
+     *                          spec's 3-unit inter-character gap. The
+     *                          WinKeyBridge sets this for every chunk after
+     *                          the first in a multi-chunk session. Default
+     *                          `false` is for FRESH, INDEPENDENT playback
+     *                          (e.g. operator presses digit-N on the keypad,
+     *                          or taps ▶ in the web UI) — consecutive
+     *                          independent playbacks must NOT prepend, or
+     *                          the user's memory-slot text lands on the
+     *                          display one char late ("cqc qj j1qpb/1j…"
+     *                          instead of "cq cq jj1qpb/1…"). See
+     *                          docs/winkey.md § 13.6 and the regression
+     *                          test test_back_to_back_independent_playback_no_prepend.
      */
-    void playText(const char* text);
+    void playText(const char* text, bool isContinuation = false);
 
     /**
      * Stop current playback immediately.
@@ -157,6 +175,19 @@ private:
     // drives advanceToNextElement. See morse_generator.cpp § Cross-
     // core invariant in the wiring block.
     bool   _wasElKeyDown = false;
+
+    // When the bridge streams text in multiple chunks and the
+    // prepend fires, the prepended CHAR_SPACE is purely an audio
+    // bridge — it preserves the inter-character gap that the
+    // encoder omits at chunk tail. It must NOT trigger a
+    // decoded-char append, because no character has just finished
+    // keying (chunk2 hasn't started yet) and chunk1's last char
+    // was already appended by chunk1's exhausted branch. Setting
+    // this flag tells advanceToNextElement's silence branch to
+    // consume the prepend's silence WITHOUT calling
+    // appendDecodedChar(). The flag is cleared after the prepend's
+    // silence element is processed.
+    bool   _suppressNextSilenceAppend = false;
 
     // Sine phase for tone generation
     float  _phase = 0.0f;

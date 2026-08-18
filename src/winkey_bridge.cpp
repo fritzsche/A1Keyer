@@ -174,6 +174,15 @@ void WinkeyBridge::resetParams() {
     // CW buffer before the host has even confirmed we are alive —
     // see docs/winkey.md § 13.9.
     _primed = false;
+    // After a reset (test or wire-facing admin reset) the next
+    // sendText() must look like a fresh, independent playback: the
+    // previous session's audio is gone and the encoder doesn't emit
+    // a trailing CHAR_SPACE, so MorseGenerator would prepend an
+    // unwanted gap if we left _isContinuation=true here.
+    _isContinuation = false;
+    _prevConsumerBusy    = false;
+    _sawAudioEndEdge     = false;
+    _prevBufferNonEmpty  = false;
 }
 
 void WinkeyBridge::emit(uint8_t byte) {
@@ -361,6 +370,14 @@ void WinkeyBridge::applyCommand(uint8_t cmd, const uint8_t* p, uint8_t n) {
             return;
         case WK_CLEAR_BUF:
             _buffer.clear();
+            // CLEAR_BUF is the host-driven "drop everything, we're
+            // done with this session" signal. The next bytes that
+            // arrive are a fresh, independent playback, not a
+            // continuation — reset _isContinuation so the next
+            // cbSendText() (when the host re-feeds text after a
+            // fresh buffer) tells MorseGenerator to skip the
+            // boundary prepend.
+            _isContinuation = false;
             if (_cb.stopSending) _cb.stopSending(_cb.ctx);
             return;
         case WK_KEY_IMMED: {
@@ -409,7 +426,121 @@ void WinkeyBridge::applyCommand(uint8_t cmd, const uint8_t* p, uint8_t n) {
 }
 
 void WinkeyBridge::poll() {
-    if (_buffer.empty()) return;
+    // Query the consumer's audio state up front — drives the
+    // `_isContinuation` lifecycle below. RUMlogNG / N1MM chunk their
+    // outgoing-CW stream into multiple bridge chunks when bytes arrive
+    // faster than audio can drain; in that case the audio is still
+    // busy (canAcceptText=false) when the next chunk's bytes are
+    // accumulated, and the next cbSendText must keep isContinuation
+    // true so MorseGenerator prepends the boundary CHAR_SPACE the
+    // encoder omits at chunk tail.
+    const bool consumerBusy =
+        _cb.canAcceptText && !_cb.canAcceptText(_cb.ctx);
+    // Edge-detect: was the consumer busy on the previous poll()?
+    // On the EDGE busy→idle AND the buffer is non-empty right now,
+    // those new bytes are NOT a continuation of the just-finished
+    // chunk — they are a fresh, independent playback the user (or
+    // host) initiated after the previous audio wound down. Reset
+    // _isContinuation so cbSendText() below calls playText(text,
+    // false) and MorseGenerator skips the prepend.
+    //
+    // The chunked-stream case ("audio still busy when bytes arrive,
+    // audio finishes, accumulated buffer drains as chunk 2") does
+    // NOT observe this edge: the buffer has been non-empty the
+    // whole time, so we never enter the `_buffer.empty()` branch
+    // while the audio was busy. Only the "audio wound down, then
+    // user tapped web UI to start a new playback" case fits.
+    const bool consumerWentIdleNow = _prevConsumerBusy && !consumerBusy;
+
+    if (_buffer.empty()) {
+        // Track the busy/idle edge for the NEXT poll() (one-tick
+        // delay). If we observed the busy→idle edge this tick but
+        // the buffer is empty (no waiting bytes yet), it's a
+        // benign edge (audio just finished, no fresh playback has
+        // arrived yet).
+        if (consumerWentIdleNow) {
+            _sawAudioEndEdge = true;
+            // The flag's MEANING is "the next cbSendText() is a
+            // continuation". As soon as the previous chunk's
+            // audio has fully wound down, that meaning is stale —
+            // any subsequent cbSendText() is by definition a new
+            // playback. Clear _isContinuation NOW so callers
+            // (the isContinuation() accessor queried by tests
+            // and the device hook) see the correct state
+            // immediately, instead of having to wait for a fresh
+            // playback to drain before the latch clears. The
+            // chunked-stream case ("audio busy, bytes arrive
+            // during audio, audio finishes, accumulated buffer
+            // drains as continuation") is still handled below in
+            // the non-empty-buffer branch — see `_sawAudioEndEdge`
+            // and the `_prevBufferNonEmpty` discussion there.
+            _isContinuation = false;
+        }
+        _prevConsumerBusy = consumerBusy;
+        _prevBufferNonEmpty = false;   // we are in the empty branch
+        return;
+    }
+    // Buffer has pending text this tick. The pending bytes are
+    // either:
+    //   (a) chunk 2 of the same chunked host session — preceded by
+    //       "audio busy, bytes arrive during audio, audio
+    //       finishes, accumulated bytes drain as continuation".
+    //       This case never saw the empty-buffer branch fire
+    //       during audio playback (buffer had bytes the whole
+    //       time), so `_sawAudioEndEdge` is false here, and the
+    //       busy→idle edge fires AT THIS poll() in the
+    //       consumerWentIdleNow variable computed above. AND the
+    //       buffer was non-empty during the previous poll
+    //       (audio was busy AND buffer had bytes waiting).
+    //   (b) a fresh independent playback the user (or host)
+    //       started after the previous audio wound down —
+    //       preceded by audio finished (busy→idle), buffer sat
+    //       EMPTY, user fed bytes. Two flavours:
+    //         (b1) bytes arrive on the SAME poll() that sees the
+    //              busy→idle edge (consumerWentIdleNow is true,
+    //              _prevBufferNonEmpty is false)
+    //         (b2) bytes arrive LATER, after the audio had been
+    //              idle for ≥1 poll. _sawAudioEndEdge was set by
+    //              the empty-buffer branch in the idle poll.
+    //
+    // For case (a), we RESTORE _isContinuation = true so
+    // MorseGenerator prepends the boundary CHAR_SPACE the encoder
+    // omits at chunk tail (the user's "UR 5NN TU sounds like X"
+    // regression). For both flavours of (b), _isContinuation
+    // must stay false — these bytes are a fresh playback.
+    //
+    // The disambiguator is `_prevBufferNonEmpty`: in case (a) the
+    // buffer was non-empty during the busy phase; in case (b1)
+    // the buffer was empty when audio went idle; in case (b2)
+    // the audio wound down ≥1 poll ago (so by definition the
+    // buffer was empty then too — anything in the buffer now
+    // arrived after).
+    if (consumerWentIdleNow) {
+        if (_prevBufferNonEmpty) {
+            // Case (a) — audio just finished AND bytes were
+            // accumulating in the buffer during the busy phase.
+            // Restore continuation so cbSendText() prepends the
+            // boundary gap.
+            _isContinuation = true;
+        } else {
+            // Case (b1) — audio just finished but the buffer was
+            // empty (no bytes accumulated during the busy phase).
+            // Bytes arrived simultaneously with — or just after —
+            // the audio finishing. Fresh playback.
+            _isContinuation = false;
+        }
+        _sawAudioEndEdge = false;
+    } else if (_sawAudioEndEdge) {
+        // Case (b2) — audio finished on a previous poll()'s
+        // empty-buffer branch (cleared _isContinuation there).
+        // Bytes now arriving are a fresh playback — keep
+        // _isContinuation false. Consume the latched edge so we
+        // don't re-process it next tick.
+        _sawAudioEndEdge = false;
+    }
+    _prevConsumerBusy = consumerBusy;
+    _prevBufferNonEmpty = !_buffer.empty();
+
     // If the consumer is still playing the previous chunk, do NOT drain.
     // The text stays in _buffer and the next poll() will drain+send it
     // as one larger chunk once the consumer is ready. This stops the
@@ -417,7 +548,7 @@ void WinkeyBridge::poll() {
     // playText() boundary) that we get when hosts stream text faster
     // than MorseGenerator can play it. See docs/winkey.md "Text
     // playback and the audio click bug".
-    if (_cb.canAcceptText && !_cb.canAcceptText(_cb.ctx)) return;
+    if (consumerBusy) return;
     // Drain accumulated text to the send hook as one chunk. The device
     // hook hands it to MorseGenerator (async audio + keying); host tests
     // record the string.
@@ -428,6 +559,14 @@ void WinkeyBridge::poll() {
     }
     chunk[nch] = '\0';
     if (nch > 0 && _cb.sendText) _cb.sendText(chunk, _cb.ctx);
+    // From here on, the next sendText() that arrives WHILE this
+    // audio is still playing is a continuation of THIS chunk — its
+    // audio is still in flight when the next chunk arrives, so the
+    // encoder will not emit a trailing CHAR_SPACE and
+    // MorseGenerator must prepend one to preserve the gap. The flag
+    // is reset back to false on the busy→idle edge above when a
+    // new playback is detected.
+    _isContinuation = true;
 }
 
 uint8_t WinkeyBridge::statusByte() const {

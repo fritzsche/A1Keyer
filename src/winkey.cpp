@@ -61,7 +61,17 @@ void cbSendText(const char* text, void* /*ctx*/) {
     // produces an audible click and choppy audio. See
     // docs/winkey.md "Text playback and the audio click bug".
     if (!gen->isPlaying()) {
-        gen->playText(text);
+        // isContinuation is true for chunks after the first in a
+        // chunked host-driven session (the bridge tracks that via
+        // _isContinuation in its poll()/resetParams() — see
+        // winkey_bridge.h). For the FIRST chunk in a session it
+        // is false, so the generator does NOT prepend a leading
+        // CHAR_SPACE (which would otherwise shift the decoded
+        // text by one position on every fresh playback). This is
+        // the same value the Winkey::playLocalMemoryText direct
+        // path uses (default false), so the two paths agree on
+        // what counts as a "fresh" playback.
+        gen->playText(text, _bridge.isContinuation());
     }
     // Echo is now handled in WinkeyBridge::appendText (per-byte,
     // K1EL-compliant — the chip echoes each text char when received, not

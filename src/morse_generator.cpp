@@ -90,7 +90,7 @@ void MorseGenerator::debugDumpEnvelope() const {
 // ---------------------------------------------------------------------------
 // Start playing a text string
 // ---------------------------------------------------------------------------
-void MorseGenerator::playText(const char* text) {
+void MorseGenerator::playText(const char* text, bool isContinuation) {
     // COPY the text — never store the caller's pointer. The WinKey
     // bridge hands us a stack-local chunk in WinkeyBridge::poll();
     // after that call returns the chunk is gone and the audio task
@@ -106,12 +106,26 @@ void MorseGenerator::playText(const char* text) {
     _elements = _encoder.encode(_playText.c_str());
 
     // Preserve inter-character silence across chunk boundaries.
-    // If the previous chunk ended naturally (not via stop()) AND
-    // did not already emit a trailing CHAR/WORD_SPACE, prepend a
-    // CHAR_SPACE so the host's split-streaming does not eat the
-    // gap. Skip when the encoder produced no elements (empty
-    // input) or when the first element is itself a silence
-    // (would compound an existing gap). See docs/winkey.md § 13.6.
+    // Only the WinKeyBridge calls playText() with isContinuation=true
+    // (for chunks after the first in a multi-chunk host-driven
+    // session); every other caller — keypad digit-N, web UI ▶, etc.
+    // — leaves it at the default false. The OLD design used the
+    // _wasPlaying flag (set on every previous playText, never reset
+    // except by stop()) to gate the prepend, which caused the
+    // back-to-back independent playback bug: after a keypad or web
+    // playback the flag stayed true forever, so the next web-UI tap
+    // prepended a CHAR_SPACE, shifting _charIdx by one and making the
+    // decoded text land with every space one position to the right
+    // ("cqc qj j1qpb/1j…" instead of "cq cq jj1qpb/1…"). The bridge
+    // now passes isContinuation=true only for chunks whose audio
+    // actually follows the previous chunk's audio (WinkeyBridge
+    // tracks that state internally via _isContinuation).
+    //
+    // The prepend conditions are unchanged: only fire when the
+    // previous chunk did not already end with a boundary silence
+    // (which would compound the gap) and when the first element of
+    // the new chunk is a mark (prepending before a silence would
+    // stack a gap on top of an existing one).
     //
     // The prepended CHAR_SPACE uses units=2 to match what
     // MorseEncoder emits internally — the trailing 1 unit of
@@ -119,14 +133,27 @@ void MorseGenerator::playText(const char* text) {
     // completes the spec's 3-unit inter-character gap. Using
     // units=3 here would produce a 4-unit gap (1 too long).
     bool didPrepend = false;
-    bool wasPlayingBefore   = _wasPlaying;
     bool wasBoundaryBefore  = _endedWithBoundarySilence;
-    if (_wasPlaying && !_endedWithBoundarySilence
+    if (isContinuation && !_endedWithBoundarySilence
         && !_elements.empty() && _elements.front().keyDown) {
         MorseEncoder::Element boundary(MorseEncoder::Element::CHAR_SPACE, 2, false);
         _elements.insert(_elements.begin(), boundary);
         didPrepend = true;
+        // Mark the prepend's silence so advanceToNextElement skips the
+        // decoded-char append when this silence element runs. Without
+        // this, the prepend's silence branch appends _currentChar
+        // (= chunk2's first char, because playText reset it) which is
+        // not what just finished keying — chunk1's exhausted branch
+        // already appended chunk1's last char. See regression
+        // test_bridge_one_char_at_a_time_long_call_no_shift.
+        _suppressNextSilenceAppend = true;
     }
+    // _wasPlaying is preserved for any external code that wants to
+    // know "has this generator ever been started since construction
+    // or last stop()". It is NOT consulted by the prepend logic
+    // anymore (see the regression test below). Set it true here so
+    // stop() callers can still distinguish a started-but-stopped
+    // generator from a never-started one if they need to.
     _wasPlaying               = true;
     _endedWithBoundarySilence = false;  // recomputed below in advanceToNextElement
 
@@ -171,11 +198,11 @@ void MorseGenerator::playText(const char* text) {
     if (callNo <= 5) {
         Log::write("[MG-DIAG] playText#%d text=\"%s\" elts=%zu prepend=%d "
                    "genWpm=%d encWpm=%d envWpm=%d envDitLen=%d envSampleRate=%d "
-                   "_wasPlaying(before)=%d _endedWithBoundarySilence(before)=%d\n",
+                   "isContinuation=%d _endedWithBoundarySilence(before)=%d\n",
             callNo, _playText.c_str(), (unsigned)_elements.size(), (int)didPrepend,
             _wpm, _encoder.wpm(), _env->wpm(),
             (int)_env->ditLengthSamples(), (int)_env->sampleRate(),
-            (int)wasPlayingBefore, (int)wasBoundaryBefore);
+            (int)isContinuation, (int)wasBoundaryBefore);
         // Dump each element so we can see exactly what the encoder produced.
         for (size_t i = 0; i < _elements.size(); ++i) {
             const auto& e = _elements[i];
@@ -353,44 +380,70 @@ void MorseGenerator::advanceToNextElement() {
 
         // WORD_SPACE or CHAR_SPACE marks end of current character
         if (el.type == MorseEncoder::Element::WORD_SPACE || el.type == MorseEncoder::Element::CHAR_SPACE) {
+            // When the bridge streams text in multiple chunks and the
+            // prepend fires, the prepended CHAR_SPACE is purely an
+            // audio bridge — it must NOT trigger a decoded-char
+            // append, because no character has just finished keying
+            // (chunk2 hasn't started yet; chunk1's last char was
+            // already appended by chunk1's exhausted branch).
+            // Consume the flag and fall through to the
+            // _currentChar/_charIdx advance below (we still need to
+            // move past this silence element so the next mark's
+            // skip-spaces loop sees the right _charIdx).
+            const bool suppressAppend = _suppressNextSilenceAppend;
+            _suppressNextSilenceAppend = false;
             if (_playText[_charIdx] != '\0') {
-                // Letter finished — append to shared decoded text buffer
-                uint32_t now = millis();
-                Log::write("[MG] APPEND t=%u char='%c' playPos=%zu/%zu\n",
-                    now,
-                    (unsigned char)_currentChar >= 32 ? (unsigned char)_currentChar : '?',
-                    (unsigned)_charIdx, _playText.size());
-                MorseModel::instance().appendDecodedChar(_currentChar, true);
-                // For WORD_SPACE, append the inter-word space separator
-                // so the device / web UI display shows the gap during
-                // the WS silence — in sync with the audio gap. Without
-                // this, the space only appears after the next word's
-                // audio (the mark branch reassigns _currentChar to the
-                // next char, the next CHAR_SPACE picks up the space,
-                // and the user sees the space land one word late).
-                //
-                // Two guards keep the leading/trailing-space behaviour
-                // unchanged:
-                //   - _currentChar != ' '   : leading-space WS shouldn't
-                //                              count as a word boundary.
-                //   - peek past trailing spaces : the WS at the end of
-                //                              the source is followed by
-                //                              only spaces (or nothing);
-                //                              those trailing spaces are
-                //                              appended by the exhausted
-                //                              branch below.
-                if (el.type == MorseEncoder::Element::WORD_SPACE
-                    && _currentChar != ' ') {
-                    size_t peek = _charIdx + 1;
-                    while (peek < _playText.size() && _playText[peek] == ' ') {
-                        ++peek;
+                if (!suppressAppend) {
+                    // Letter finished — append to shared decoded text buffer
+                    uint32_t now = millis();
+                    Log::write("[MG] APPEND t=%u char='%c' playPos=%zu/%zu\n",
+                        now,
+                        (unsigned char)_currentChar >= 32 ? (unsigned char)_currentChar : '?',
+                        (unsigned)_charIdx, _playText.size());
+                    MorseModel::instance().appendDecodedChar(_currentChar, true);
+                    // For WORD_SPACE, append the inter-word space separator
+                    // so the device / web UI display shows the gap during
+                    // the WS silence — in sync with the audio gap. Without
+                    // this, the space only appears after the next word's
+                    // audio (the mark branch reassigns _currentChar to the
+                    // next char, the next CHAR_SPACE picks up the space,
+                    // and the user sees the space land one word late).
+                    //
+                    // Two guards keep the leading/trailing-space behaviour
+                    // unchanged:
+                    //   - _currentChar != ' '   : leading-space WS shouldn't
+                    //                              count as a word boundary.
+                    //   - peek past trailing spaces : the WS at the end of
+                    //                              the source is followed by
+                    //                              only spaces (or nothing);
+                    //                              those trailing spaces are
+                    //                              appended by the exhausted
+                    //                              branch below.
+                    if (el.type == MorseEncoder::Element::WORD_SPACE
+                        && _currentChar != ' ') {
+                        size_t peek = _charIdx + 1;
+                        while (peek < _playText.size() && _playText[peek] == ' ') {
+                            ++peek;
+                        }
+                        if (peek < _playText.size()) {
+                            MorseModel::instance().appendDecodedChar(' ', true);
+                        }
                     }
-                    if (peek < _playText.size()) {
-                        MorseModel::instance().appendDecodedChar(' ', true);
-                    }
+                    // Advance past this silence element so subsequent
+                    // CHAR_SPACEs know which char was just keyed.
+                    ++_charIdx;
+                    _currentChar = _playText[_charIdx];
                 }
-                ++_charIdx;
-                _currentChar = _playText[_charIdx];
+                // suppressAppend path (prepend): do NOT advance
+                // _charIdx or change _currentChar. The prepend's
+                // CHAR_SPACE is purely an audio bridge — it provides
+                // the inter-character gap the encoder omits at chunk
+                // tail, but no character has just finished keying
+                // (chunk2's first mark hasn't played yet). The next
+                // mark's skip-spaces loop still runs from the same
+                // _charIdx (0), finds the first non-space char at the
+                // same source position playText() initialised it to,
+                // and sets _currentChar correctly.
             }
         }
     }

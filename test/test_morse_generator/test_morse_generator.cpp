@@ -225,10 +225,13 @@ static void test_split_chunks_preserve_inter_char_space() {
     // last char in a chunk, so without the fix "U" starts
     // immediately after T's DAH.
     //
-    // Strategy: drain "T" to completion. Then playText("U") and
-    // sample the first 3*ditSamples of audio. With the fix, that
-    // window is entirely silence (the prepended CHAR_SPACE).
-    // Without the fix, U's first DIT lands within that window.
+    // Strategy: drain "T" to completion. Then playText("U", true)
+    // — the `true` models the WinKeyBridge marking the next chunk
+    // as a continuation (its audio follows the previous chunk's
+    // audio without a gap) — and sample the first 2*ditSamples of
+    // audio. With the fix, that window is entirely silence (the
+    // prepended CHAR_SPACE). Without the fix, U's first DIT lands
+    // within that window.
     KeyEnvelop env(20, 0.005f, 48000);
     MorseGenerator gen(&env, 20);
     int ditSamples = env.ditLengthSamples();
@@ -240,7 +243,7 @@ static void test_split_chunks_preserve_inter_char_space() {
         gen.fillSamplesMono(buf.data(), buf.size(), 500.0f, 16384);
     CHECK(!gen.isPlaying());
 
-    gen.playText("U");
+    gen.playText("U", true);
     CHECK(gen.isPlaying());
 
     int nz = countNonZeroInWindow(gen, 2 * ditSamples);
@@ -252,10 +255,11 @@ static void test_split_with_trailing_space_no_double_gap() {
     // must NOT prepend another CHAR_SPACE on top, otherwise the gap
     // would be 7 + 3 = 10 units instead of the expected 7 units.
     //
-    // Strategy: drain "T " to completion. Then playText("U") and
-    // sample the first 3*ditSamples. With the fix, that window
-    // contains U's first DIT (non-zero). Without the fix (if we
-    // incorrectly prepended), the window would be silent.
+    // Strategy: drain "T " to completion. Then playText("U", true)
+    // — the `true` models the bridge marking this as a continuation
+    // — and sample the first 3*ditSamples. With the fix, that
+    // window contains U's first DIT (non-zero). Without the fix
+    // (if we incorrectly prepended), the window would be silent.
     KeyEnvelop env(20, 0.005f, 48000);
     MorseGenerator gen(&env, 20);
     int ditSamples = env.ditLengthSamples();
@@ -267,7 +271,7 @@ static void test_split_with_trailing_space_no_double_gap() {
         gen.fillSamplesMono(buf.data(), buf.size(), 500.0f, 16384);
     CHECK(!gen.isPlaying());
 
-    gen.playText("U");
+    gen.playText("U", true);
     int nz = countNonZeroInWindow(gen, 3 * ditSamples);
     CHECK(nz > 0);
 }
@@ -289,6 +293,12 @@ static void test_stop_resets_prepend_state() {
     int nz = countNonZeroInWindow(gen, 3 * ditSamples);
     CHECK(nz > 0);
 }
+
+// --- Regression test for the back-to-back independent playback bug ---
+//
+// (Defined later, after readDecodedText(), because it uses that
+// helper. Declared here so the RUN() in main() can resolve it.)
+static void test_back_to_back_independent_playback_no_prepend();
 
 // --- Real-world RUMlogNG chunking patterns ---
 //
@@ -323,7 +333,8 @@ static std::vector<int16_t> drainChunkAndStartNext(MorseGenerator& gen,
 
 static void test_rumlog_ur_599_TU() {
     // User-reported scenario: "UR 599 " then "TU".
-    // Chunk 1 ends with WORD_SPACE → no prepend → encoder emits
+    // Chunk 1 ends with WORD_SPACE → no prepend (even with
+    // isContinuation=true) → encoder emits
     // [DAH, CHAR_SPACE, DIT, DIT, DAH] for chunk 2.
     //   timeline (DAH envelope = 4u, CHAR_SPACE = 2u, DIT = 2u):
     //     T_DAH(4u: 3 tone + 1 trailing) | CHAR_SPACE(2u silence) | U_DIT(2u)
@@ -342,7 +353,7 @@ static void test_rumlog_ur_599_TU() {
     while (gen.isPlaying() && maxIter-- > 0)
         gen.fillSamplesMono(buf.data(), buf.size(), 500.0f, 16384);
 
-    gen.playText("TU");
+    gen.playText("TU", true);  // continuation — bridge marks it as such
     // First 4 units = T's DAH envelope (3 tone + 1 trailing silence)
     std::vector<int16_t> tMark(4 * ditSamples, 0);
     gen.fillSamplesMono(tMark.data(), tMark.size(), 500.0f, 16384);
@@ -378,7 +389,7 @@ static void test_rumlog_ur_5NN_TU() {
     while (gen.isPlaying() && maxIter-- > 0)
         gen.fillSamplesMono(buf.data(), buf.size(), 500.0f, 16384);
 
-    gen.playText("TU");
+    gen.playText("TU", true);  // continuation
     std::vector<int16_t> tMark(4 * ditSamples, 0);
     gen.fillSamplesMono(tMark.data(), tMark.size(), 500.0f, 16384);
     int nz = 0;
@@ -394,13 +405,16 @@ static void test_rumlog_ur_5NN_TU() {
 
 static void test_rumlog_ur_5NN_T_then_U() {
     // Worst case: "UR 5NN " then "T" then "U" (host paused mid-word).
-    // After "UR 5NN " chunk ends with WORD_SPACE (no prepend for "T").
+    // After "UR 5NN " chunk ends with WORD_SPACE (no prepend for "T"
+    // because _endedWithBoundarySilence is true).
     // Encoder emits [DAH] for "T" — no trailing CHAR_SPACE because T
     // is the last char in the chunk. After T's DAH drains, _ended-
-    // WithBoundarySilence = false, so playText("U") MUST prepend a
-    // CHAR_SPACE. The first 2*ditSamples after playText("U") must be
-    // silence (the prepended boundary CHAR_SPACE; total gap with T's
-    // envelope trailing is 3 spec units).
+    // WithBoundarySilence = false, so playText("U", true) MUST
+    // prepend a CHAR_SPACE (the explicit continuation flag is what
+    // gates the prepend now, not _wasPlaying). The first 2*ditSamples
+    // after playText("U") must be silence (the prepended boundary
+    // CHAR_SPACE; total gap with T's envelope trailing is 3 spec
+    // units).
     KeyEnvelop env(20, 0.005f, 48000);
     MorseGenerator gen(&env, 20);
     int ditSamples = env.ditLengthSamples();
@@ -411,12 +425,12 @@ static void test_rumlog_ur_5NN_T_then_U() {
     while (gen.isPlaying() && maxIter-- > 0)
         gen.fillSamplesMono(buf.data(), buf.size(), 500.0f, 16384);
 
-    gen.playText("T");
+    gen.playText("T", true);  // continuation
     maxIter = 4000;
     while (gen.isPlaying() && maxIter-- > 0)
         gen.fillSamplesMono(buf.data(), buf.size(), 500.0f, 16384);
 
-    gen.playText("U");
+    gen.playText("U", true);  // continuation — MUST prepend
     int nz = countNonZeroInWindow(gen, 2 * ditSamples);
     CHECK(nz == 0);
 }
@@ -433,7 +447,7 @@ static void test_rumlog_599_TU() {
     while (gen.isPlaying() && maxIter-- > 0)
         gen.fillSamplesMono(buf.data(), buf.size(), 500.0f, 16384);
 
-    gen.playText("TU");
+    gen.playText("TU", true);  // continuation
     // First 4 units = T's DAH (tone)
     std::vector<int16_t> tMark(4 * ditSamples, 0);
     gen.fillSamplesMono(tMark.data(), tMark.size(), 500.0f, 16384);
@@ -681,6 +695,466 @@ static void test_full_memory_playback_appends_in_order() {
     CHECK(got == "CQ CQ JJ1QPB/1 JJ1QPB/1");
 }
 
+// --- Regression test for the back-to-back independent playback bug ---
+//
+// The user's symptom: playing back "CQ CQ JJ1QPB/1 JJ1QPB/1" once via
+// the keypad produced correct output, but playing it back AGAIN via
+// the web UI produced "cqc qj j1qpb/1j j1qpb/1" — spaces shifted one
+// position to the right. Root cause: the OLD design gated the
+// boundary prepend on the `_wasPlaying` flag (set on every playText,
+// never reset except by stop()), so any second consecutive playText()
+// prepended an unwanted CHAR_SPACE that advanced _charIdx past the
+// first char of the new text. The new design gates the prepend on
+// the explicit `isContinuation` parameter; this test asserts that
+// two INDEPENDENT playText() calls (no continuation flag, no stop()
+// between them) both render correctly.
+static void test_back_to_back_independent_playback_no_prepend() {
+    KeyEnvelop env(20, 0.005f, 48000);
+    MorseGenerator gen(&env, 20);
+    MorseModel::instance().clearDecodedText();
+
+    // First playback: fresh, default isContinuation=false.
+    gen.playText("CQ CQ JJ1QPB/1 JJ1QPB/1");
+    std::vector<int16_t> buf(1024, 0);
+    int maxIter = 20000;
+    while (gen.isPlaying() && maxIter-- > 0)
+        gen.fillSamplesMono(buf.data(), buf.size(), 500.0f, 16384);
+
+    std::string firstGot = readDecodedText();
+    CHECK(firstGot == "CQ CQ JJ1QPB/1 JJ1QPB/1");
+
+    // Second playback: ALSO fresh, default isContinuation=false.
+    // With the OLD bug, _wasPlaying was still true from the first
+    // call and the boundary prepend fired, shifting every space one
+    // position to the right ("cqc qj j1qpb/1j j1qpb/1"). With the
+    // fix, the prepend is gated on the explicit isContinuation flag
+    // (false here), so the second playback renders identically to
+    // the first.
+    MorseModel::instance().clearDecodedText();
+    gen.playText("CQ CQ JJ1QPB/1 JJ1QPB/1");
+    maxIter = 20000;
+    while (gen.isPlaying() && maxIter-- > 0)
+        gen.fillSamplesMono(buf.data(), buf.size(), 500.0f, 16384);
+
+    std::string secondGot = readDecodedText();
+    CHECK(secondGot == "CQ CQ JJ1QPB/1 JJ1QPB/1");
+    CHECK(firstGot == secondGot);
+}
+
+// ─── Bridge integration regression (2026-08-18) ────────────────────────
+//
+// The previous tests above call MorseGenerator::playText directly with
+// an explicit isContinuation=true flag to model what the bridge does
+// in production. But the bridge actually derives the flag from its
+// own _isContinuation state, and if that state is wrong the tests
+// won't catch it — they'd model behaviour that never happens.
+//
+// This test wires a real WinkeyBridge → MorseGenerator::playText
+// pipeline (the same as production), then feeds "UR 5NN " followed
+// by "TU" via the host-side byte stream (the RUMlogNG chunking
+// pattern the user reported). It then checks the audio between
+// T's DAH and U's first DIT contains the expected 2-unit silence
+// from the encoder's CHAR_SPACE between T and U. If the bridge's
+// _isContinuation tracking is wrong and the prepend is dropped
+// (or, conversely, applied when it shouldn't be), this test will
+// fail with the symptom the user heard: "TU" sounding like "X"
+// because the inter-character gap is missing.
+
+#include "winkey_bridge.h"
+#include "morse_encoder.h"
+
+namespace bridge_test {
+
+struct BridgeRunner {
+    WinkeyBridge br;
+    MorseGenerator* gen = nullptr;
+
+    static void cbSendText(const char* t, void* ctx) {
+        auto* self = static_cast<BridgeRunner*>(ctx);
+        MorseGenerator* g = self->gen;
+        if (!g) return;
+        // Mirror what src/winkey.cpp does: only call playText when
+        // the generator is idle, and pass the bridge's continuation
+        // flag through. This is the EXACT production path.
+        if (!g->isPlaying()) {
+            g->playText(t, self->br.isContinuation());
+        }
+    }
+    static bool cbCanAccept(void* ctx) {
+        auto* self = static_cast<BridgeRunner*>(ctx);
+        return self->gen && !self->gen->isPlaying();
+    }
+    static void cbStop(void*) {}
+    static void cbOut(uint8_t, void*) {}
+    static void cbWpm(int, void*) {}
+    static void cbSidetone(int, void*) {}
+    static void cbOutEn(bool, void*) {}
+
+    void setup() {
+        WinkeyBridge::Callbacks cb{};
+        cb.sendText      = &cbSendText;
+        cb.canAcceptText = &cbCanAccept;
+        cb.stopSending   = &cbStop;
+        cb.ctx           = this;   // so the static callbacks can find `this`
+        br.begin(&cbOut, nullptr, cb);
+        br.resetParams();   // start clean
+        // Host-open → version, status mode, GET_POT to prime.
+        br.feed(0x00); br.feed(0x02);
+        br.feed(0x00); br.feed(0x0B);
+        br.feed(0x07);
+    }
+
+    void feedText(const char* s) {
+        for (const char* p = s; *p; ++p) br.feed((uint8_t)*p);
+    }
+};
+
+}  // namespace bridge_test
+
+static void test_bridge_chunks_preserve_inter_char_T_to_U() {
+    using namespace bridge_test;
+    KeyEnvelop env(20, 0.005f, 48000);
+    MorseGenerator gen(&env, 20);
+
+    BridgeRunner r;
+    r.gen = &gen;
+    r.setup();
+
+    // Feed chunk 1 ("UR 5NN ", with trailing space — typical
+    // RUMlogNG pacing) and drain.
+    r.feedText("UR 5NN ");
+    r.br.poll();
+    int ditSamples = env.ditLengthSamples();
+    std::vector<int16_t> buf(256, 0);
+    int maxIter = 4000;
+    while (gen.isPlaying() && maxIter-- > 0)
+        gen.fillSamplesMono(buf.data(), buf.size(), 500.0f, 16384);
+    CHECK(!gen.isPlaying());
+
+    // After chunk 1 has been dispatched to cbSendText, the bridge's
+    // _isContinuation flag MUST be true: the next poll() that drains
+    // a non-empty buffer should treat the second chunk as a
+    // continuation of the first, so playText() prepends the
+    // boundary CHAR_SPACE that the encoder does not emit at the
+    // chunk's tail. If this flag is wrong, the second chunk's T
+    // and U run back-to-back with no inter-character gap → the
+    // "TU sounds like X" symptom the user reported.
+    CHECK(r.br.isContinuation());
+
+    // Production-like interleaving: poll() runs every loop() tick,
+    // not just when bytes arrive. Between chunk 1's drain and
+    // chunk 2's arrival, multiple poll()s fire — and every one of
+    // them sees an empty buffer and resets _isContinuation=false
+    // (current bridge behaviour). To catch that regression, drive
+    // poll() repeatedly here exactly the way the device does in its
+    // main loop, then verify the flag is still true when chunk 2
+    // finally arrives.
+    for (int i = 0; i < 5; ++i) {
+        r.br.poll();          // production-style: drains even when empty
+    }
+    CHECK(r.br.isContinuation());
+
+    // Feed chunk 2 ("TU") and check the audio gap between T and U.
+    r.feedText("TU");
+    r.br.poll();
+    CHECK(gen.isPlaying());
+
+    // T's DAH envelope (4 units: 3 tone + 1 trailing). First 4u
+    // should contain tone.
+    std::vector<int16_t> tMark(4 * ditSamples, 0);
+    gen.fillSamplesMono(tMark.data(), tMark.size(), 500.0f, 16384);
+    int nz = 0;
+    for (auto s : tMark) if (s != 0) ++nz;
+    CHECK(nz > 0);  // T's DAH tone is audible
+
+    // The encoder emits CHAR_SPACE between T and U (2 units of
+    // silence). The next 2u should be silent.
+    std::vector<int16_t> tToU(2 * ditSamples, 0);
+    gen.fillSamplesMono(tToU.data(), tToU.size(), 500.0f, 16384);
+    nz = 0;
+    for (auto s : tToU) if (s != 0) ++nz;
+    CHECK(nz == 0);  // T→U encoder CHAR_SPACE preserved
+
+    // U's first DIT (2 units: 1 tone + 1 trailing). First u should
+    // be tone.
+    std::vector<int16_t> uStart(ditSamples, 0);
+    gen.fillSamplesMono(uStart.data(), uStart.size(), 500.0f, 16384);
+    nz = 0;
+    for (auto s : uStart) if (s != 0) ++nz;
+    CHECK(nz > 0);
+}
+
+static void test_bridge_single_chunk_TU_audio_correct() {
+    // Single-chunk "TU" via the bridge. No preceding chunk, so the
+    // bridge's _isContinuation is false (no prepend). The encoder
+    // still emits CHAR_SPACE between T and U, so the gap must be
+    // audible — this is the baseline that proves the encoder's
+    // CHAR_SPACE is intact regardless of the prepend logic.
+    using namespace bridge_test;
+    KeyEnvelop env(20, 0.005f, 48000);
+    MorseGenerator gen(&env, 20);
+
+    BridgeRunner r;
+    r.gen = &gen;
+    r.setup();
+
+    r.feedText("TU");
+    r.br.poll();
+    int ditSamples = env.ditLengthSamples();
+
+    // T's DAH (4 units).
+    std::vector<int16_t> tMark(4 * ditSamples, 0);
+    gen.fillSamplesMono(tMark.data(), tMark.size(), 500.0f, 16384);
+    int nz = 0;
+    for (auto s : tMark) if (s != 0) ++nz;
+    CHECK(nz > 0);
+
+    // Encoder's CHAR_SPACE between T and U (2 units).
+    std::vector<int16_t> tToU(2 * ditSamples, 0);
+    gen.fillSamplesMono(tToU.data(), tToU.size(), 500.0f, 16384);
+    nz = 0;
+    for (auto s : tToU) if (s != 0) ++nz;
+    CHECK(nz == 0);
+
+    // U's first DIT.
+    std::vector<int16_t> uStart(ditSamples, 0);
+    gen.fillSamplesMono(uStart.data(), uStart.size(), 500.0f, 16384);
+    nz = 0;
+    for (auto s : uStart) if (s != 0) ++nz;
+    CHECK(nz > 0);
+}
+
+// Two INDEPENDENT bridge-driven playbacks of the same multi-word
+// memory slot, with multiple poll()s in between (the production
+// cadence). After playback 1 drains and the bridge sits idle for
+// many ticks, the next playback must NOT be flagged as a
+// continuation: the user's "decoded text shifted +1" symptom is
+// the encode-side appearance of the boundary CHAR_SPACE prepend
+// firing on a fresh playback.
+//
+// The audio stays correct because the encoder naturally emits
+// its own inter-character silence within a chunk, so a
+// mistakenly-prepended CHAR_SPACE just adds an extra advance of
+// _charIdx in the silence branch — which appends _currentChar
+// (the first char of the new text, set by playText's init) and
+// then the next CS appends the second char, shifting every
+// subsequent space one position to the right.
+static void test_bridge_two_independent_playbacks_do_not_shift_text() {
+    using namespace bridge_test;
+    KeyEnvelop env(20, 0.005f, 48000);
+    MorseGenerator gen(&env, 20);
+
+    BridgeRunner r;
+    r.gen = &gen;
+    r.setup();
+    MorseModel::instance().clearDecodedText();
+
+    const char* kMemory = "CQC CQ DE DJ1TF DJ1TF DJ1TF PSE K";
+
+    bool firstDrain = true;
+    auto drainAndPump = [&](int emptyPumpTicks) {
+        std::vector<int16_t> buf(256, 0);
+        int maxIter = 8000;
+        // Production cadence: poll() runs every loop() tick.
+        // Alternate draining a few samples and polling so the bridge
+        // observes the consumer busy→idle transition (audio playing
+        // then audio finishing). Without interleaving, the bridge
+        // never sees the busy state and the busy→idle edge is never
+        // observed — many bridges rely on that edge for their state
+        // machine, including this one (see winkey_bridge.cpp
+        // `_prevConsumerBusy`).
+        while (gen.isPlaying() && maxIter-- > 0) {
+            gen.fillSamplesMono(buf.data(), buf.size(), 500.0f, 16384);
+            r.br.poll();
+        }
+        // Now audio is idle. Pump several empty polls.
+        for (int i = 0; i < emptyPumpTicks; ++i) r.br.poll();
+        // After the FIRST playback drains and the device sits idle,
+        // the bridge's flag MUST be false (the previous session
+        // ended; the next cbSendText() will be a fresh playback).
+        // We only check this on the first drain — playback 2's
+        // drainAndPump(0) ends right after cbSendText fired and set
+        // _isContinuation back to true (which is correct: the *next*
+        // playback, if any, would be a continuation of playback 2).
+        if (firstDrain) {
+            CHECK(!r.br.isContinuation());
+            firstDrain = false;
+        }
+    };
+
+    // Playback 1.
+    r.feedText(kMemory);
+    r.br.poll();
+    drainAndPump(/*emptyPumpTicks=*/200);
+
+    // Playback 2 — same memory, fed fresh.
+    MorseModel::instance().clearDecodedText();
+    r.feedText(kMemory);
+    r.br.poll();
+    drainAndPump(/*emptyPumpTicks=*/0);
+
+    std::string got = readDecodedText();
+    CHECK(got == std::string(kMemory));
+}
+
+// One-char-at-a-time pacing: every fed byte is followed by a poll and
+// a tiny audio drain. Worst-case serial pacing from a slow logger or
+// USB-CDC with Nagle off. Verifies the decoded text exactly matches
+// the source even when the bridge sees no opportunity to coalesce
+// bytes into larger chunks.
+static void test_bridge_one_char_at_a_time_long_call_no_shift() {
+    using namespace bridge_test;
+    KeyEnvelop env(20, 0.005f, 48000);
+    MorseGenerator gen(&env, 20);
+
+    BridgeRunner r;
+    r.gen = &gen;
+    r.setup();
+
+    MorseModel::instance().clearDecodedText();
+    const char* kSrc = "CQ CQ DE DJ1TF DJ1TF DJ1TF PSE K";
+    auto drainOneElement = [&]() {
+        std::vector<int16_t> buf(128, 0);
+        // Drain enough to ensure the busy→idle edge is observed by the
+        // bridge on the next poll. Take a small amount then poll, repeat.
+        for (int i = 0; i < 8 && gen.isPlaying(); ++i) {
+            gen.fillSamplesMono(buf.data(), buf.size(), 500.0f, 16384);
+            r.br.poll();
+        }
+    };
+    for (const char* p = kSrc; *p; ++p) {
+        r.br.feed((uint8_t)*p);
+        r.br.poll();
+        drainOneElement();
+    }
+    // Drain remaining audio.
+    std::vector<int16_t> buf(256, 0);
+    int maxIter = 8000;
+    while (gen.isPlaying() && maxIter-- > 0) {
+        gen.fillSamplesMono(buf.data(), buf.size(), 500.0f, 16384);
+        r.br.poll();
+    }
+    for (int i = 0; i < 50; ++i) r.br.poll();
+
+    std::string got = readDecodedText();
+    CHECK(got == std::string(kSrc));
+}
+//
+// User-reported: a long memory slot ("CQ CQ DE DJ1TF DJ1TF DJ1TF PSE K")
+// renders correctly on small texts but loses two spaces near the end
+// on a "long call": "CQ CQ DE DJ1TF DJ1TF DJ1TFP SEK" (the spaces
+// before "PSE" and before "K" vanish). Two characters get pulled to
+// the left, removing the boundary spaces.
+//
+// Production chunking: RUMlogNG / N1MM stream the entire slot to the
+// bridge in ~one serial-burst tick. The audio thread consumes slowly
+// compared to the serial arrival — bytes accumulate in the bridge
+// buffer while the first chunk's audio plays. When the first chunk's
+// audio finishes, the accumulated buffer drains as the SECOND
+// chunk. A long string may span several such drains if audio playback
+// is slower than serial feeding.
+//
+// Each chunk-boundary at a non-trailing MARK position (e.g. last char
+// of chunk 1 ends in DAH rather than silence) is the dangerous shape:
+// the encoder emits no trailing silence at the chunk tail, and the
+// bridge's "_isContinuation" signal must fire the boundary CHAR_SPACE
+// prepend in MorseGenerator to preserve the inter-character gap. If
+// the append's interaction with _charIdx in the silence branch
+// mismatched against the existing decoded text, the prepend advances
+// _charIdx by one — silently eating the source's space at the
+// boundary.
+//
+// This test simulates a 3-chunk split of the user's source string
+// where every chunk ends at a MARK (worst case for the prepend) and
+// verifies that the decoded text matches the source exactly.
+
+static void test_bridge_three_chunks_long_call_no_text_shift() {
+    using namespace bridge_test;
+    KeyEnvelop env(20, 0.005f, 48000);
+    MorseGenerator gen(&env, 20);
+
+    BridgeRunner r;
+    r.gen = &gen;
+    r.setup();
+
+    MorseModel::instance().clearDecodedText();
+    const char* full =
+        "CQ CQ DE DJ1TF DJ1TF DJ1TF PSE K";
+
+    // Three contiguous substrings chosen to end at MARK boundaries
+    // (no trailing spaces). The last chunk has a trailing space —
+    // the encoder produces a trailing WS for it which guards the
+    // very last boundary.
+    const char* kChunks[] = {
+        "CQ CQ DE",            // ends after E (DAH, mark) → no boundary silence
+        " DJ1TF DJ1TF",        // starts with leading space, ends F (DAH)
+        " DJ1TF PSE K",        // ends with K (DAH) + trailing nothing
+    };
+
+    auto drainAndPump = [&](bool pumpMany) {
+        std::vector<int16_t> buf(256, 0);
+        int maxIter = 8000;
+        while (gen.isPlaying() && maxIter-- > 0) {
+            gen.fillSamplesMono(buf.data(), buf.size(), 500.0f, 16384);
+            r.br.poll();
+        }
+        int n = pumpMany ? 50 : 5;
+        for (int i = 0; i < n; ++i) r.br.poll();
+    };
+
+    for (size_t i = 0; i < sizeof(kChunks)/sizeof(kChunks[0]); ++i) {
+        r.feedText(kChunks[i]);
+        r.br.poll();
+        drainAndPump(/*pumpMany=*/false);
+    }
+
+    std::string got = readDecodedText();
+    CHECK(got == std::string(full));
+}
+
+// Same idea but every chunk ends WITHOUT a trailing space AND the
+// first chunk's encoder output ends at a MARK. This is the
+// worst-case shape for the boundary prepend — and also the shape
+// that would surface the residual issue if the bridge's
+// `_isContinuation` tracking on the non-empty / consumer-busy → idle
+// edge mistakenly fired across multiple chunks.
+static void test_bridge_chunks_ending_at_mark_no_text_shift() {
+    using namespace bridge_test;
+    KeyEnvelop env(20, 0.005f, 48000);
+    MorseGenerator gen(&env, 20);
+
+    BridgeRunner r;
+    r.gen = &gen;
+    r.setup();
+
+    MorseModel::instance().clearDecodedText();
+    // Source has 3 "chunks" each ending at a MARK. The prepend fires
+    // at every chunk boundary. Verify that nothing in the prepend /
+    // silence-branch interaction causes the decoded text to lose any
+    // of the source's inter-word spaces.
+    const char* kSrc = "AB CD EF GH";
+
+    auto drainAndPump = [&]() {
+        std::vector<int16_t> buf(256, 0);
+        int maxIter = 8000;
+        while (gen.isPlaying() && maxIter-- > 0) {
+            gen.fillSamplesMono(buf.data(), buf.size(), 500.0f, 16384);
+            r.br.poll();
+        }
+        for (int i = 0; i < 5; ++i) r.br.poll();
+    };
+
+    const char* kChunks[] = { "AB", " C", "D E", "F G", "H" };
+    for (size_t i = 0; i < sizeof(kChunks)/sizeof(kChunks[0]); ++i) {
+        r.feedText(kChunks[i]);
+        r.br.poll();
+        drainAndPump();
+    }
+
+    std::string got = readDecodedText();
+    CHECK(got == std::string(kSrc));
+}
+
 
 int main() {
     printf("=== test_morse_generator ===\n");
@@ -705,6 +1179,8 @@ int main() {
     RUN(test_rumlog_ur_599_TU);
     RUN(test_rumlog_ur_5NN_TU);
     RUN(test_rumlog_ur_5NN_T_then_U);
+    RUN(test_bridge_chunks_preserve_inter_char_T_to_U);
+    RUN(test_bridge_single_chunk_TU_audio_correct);
     RUN(test_rumlog_599_TU);
     RUN(test_playText_wakes_screensaver_on_each_keydown_element);
     RUN(test_silence_only_text_does_not_wake);
@@ -714,5 +1190,10 @@ int main() {
     RUN(test_leading_multi_space_input);
     RUN(test_trailing_space_after_words);
     RUN(test_full_memory_playback_appends_in_order);
+    RUN(test_back_to_back_independent_playback_no_prepend);
+    RUN(test_bridge_two_independent_playbacks_do_not_shift_text);
+    RUN(test_bridge_one_char_at_a_time_long_call_no_shift);
+    RUN(test_bridge_three_chunks_long_call_no_text_shift);
+    RUN(test_bridge_chunks_ending_at_mark_no_text_shift);
     return test_summary();
 }

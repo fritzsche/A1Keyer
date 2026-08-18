@@ -94,6 +94,20 @@ public:
     /// WK version byte reported on host-open. 0x17 = WK2 rev 2.3.
     static constexpr uint8_t kVersion = 0x17;
 
+    /// True when the next sendText() the bridge is about to dispatch
+    /// is a CONTINUATION of a chunked playback (i.e. the previous
+    /// chunk's audio just finished and the encoder does not emit a
+    /// trailing inter-character silence, so MorseGenerator must
+    /// prepend a CHAR_SPACE to preserve the spec's 3-unit gap). False
+    /// for the FIRST chunk in a session (no previous chunk) — that
+    /// chunk is a fresh, independent playback and the prepend would
+    /// shift the decoded text by one position. The device-side hook
+    /// in winkey.cpp reads this via isContinuation() and passes it
+    /// to MorseGenerator::playText(text, isContinuation). See
+    /// docs/winkey.md § 13.6 and the regression test
+    /// test_back_to_back_independent_playback_no_prepend.
+    bool isContinuation() const { return _isContinuation; }
+
     /// Reset all protocol state including `_open=false`. Used by host
     /// tests between RUN() cases; the wire-facing admin-reset path does
     /// NOT call this — it must keep the host interface open so a
@@ -210,4 +224,46 @@ private:
 
     // CW send buffer (text >= 0x20 accumulates here, drains in poll()).
     WinkeyBuffer _buffer;
+
+    // Chunked-playback continuation tracker. Set false at session
+    // boundaries (resetParams, WK_CLEAR_BUF, busy→idle edge with
+    // fresh bytes waiting); set true after every cbSendText()
+    // call (so the next chunk in the SAME session is flagged as a
+    // continuation). The device hook in winkey.cpp reads
+    // isContinuation() and passes it to MorseGenerator::playText()
+    // to gate the boundary prepend — see playText()'s docs for
+    // the rationale.
+    bool _isContinuation = false;
+
+    // Previous tick's consumer-busy state. Used by poll() to edge
+    // detect the busy→idle transition of the MorseGenerator. When
+    // the audio just finished (busy→idle) AND fresh bytes are
+    // waiting in the buffer, the next cbSendText() is a fresh
+    // playback, not a continuation — _isContinuation must be
+    // cleared so MorseGenerator skips the boundary prepend.
+    bool _prevConsumerBusy = false;
+
+    // Latched "the consumer's audio just transitioned from busy to
+    // idle" flag. Set by poll() when it observes a busy→idle edge
+    // while the buffer is empty (audio just wound down, no fresh
+    // bytes yet). Read+cleared by the NEXT poll() that finds the
+    // buffer non-empty — at that point the bytes that arrived are
+    // a fresh, independent playback, and _isContinuation must be
+    // cleared before cbSendText() fires so MorseGenerator skips
+    // the boundary prepend.
+    bool _sawAudioEndEdge = false;
+
+    // Previous tick's buffer-occupancy state. Used by poll() to
+    // disambiguate the chunked-stream case ("bytes accumulated in
+    // the bridge buffer while audio was busy; audio finished;
+    // accumulated bytes drain as a continuation") from the
+    // one-char-at-a-time case ("audio finished naturally; bytes
+    // arrive one-by-one after; each byte is its own fresh
+    // playback, not a continuation"). On the busy→idle edge with
+    // the buffer currently non-empty, we set _isContinuation=true
+    // ONLY if the buffer was already non-empty during the busy
+    // phase (i.e. bytes were accumulating). If the buffer was
+    // empty when the audio finished, the bytes that subsequently
+    // arrive are a fresh playback. See winkey_bridge.cpp poll().
+    bool _prevBufferNonEmpty = false;
 };
