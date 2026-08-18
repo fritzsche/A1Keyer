@@ -245,6 +245,7 @@ same way (via `DisplayTask`'s render hook).
 | Decode shift on back-to-back independent playback | web ▶ twice in a row showed "CQC QJ J1QPB/1J…" | bridge's `_isContinuation` flag stayed true across sessions because of the previous fix | add explicit reset on busy→idle edge + `_sawAudioEndEdge` latch | `test_bridge_two_independent_playbacks_do_not_shift_text` |
 | "CQ " (trailing space) during playback | second C of "CQ CQ" audio played while display still showed trailing space | mark branch set `_currentChar` to a space (because WS branch left `_charIdx` pointing at one) | add skip-spaces loop in mark branch to advance past spaces | `test_word_boundary_displays_inter_word_space_at_word_boundary` |
 | Long-call decode shift | `"CQ CQ DE DJ1TF DJ1TF DJ1TF PSE K"` rendered as `"...DJ1TFP SEK"` (or worse with one-char-at-a-time pacing) | bridge mis-classified one-char-at-a-time bytes as continuation; generator's prepend then advanced `_charIdx` past the first chunk's char into the next space | track `_prevBufferNonEmpty` to disambiguate chunked-stream from one-char-at-a-time; add `_suppressNextSilenceAppend` flag to skip the prepend's append | `test_bridge_one_char_at_a_time_long_call_no_shift` |
+| Memory-keyer: "OO" keyed as "- -" | multi-element characters collapsed into one radio pulse — GPIO4 stayed HIGH through the entire 4·ditLen envelope of every mark (3 units tone + 1 unit trailing silence all keyed), so "OO" (3 DAHs back-to-back, no inter-element silence in the encoder's element list) produced 480 ms continuous HIGH — the radio heard one long dash instead of three. Sidetone was unaffected because the envelope's 1-unit trailing silence is audible in audio. | `MorseGenerator` fired `KeyEventBus::keyUp()` only at the *next silence element*, not at the keyed boundary of each mark. The `IambicKeyer` already had the correct semantics (`_elementKeyedSamples = 1·ditLen for DIT, 3·ditLen for DAH`); MG did not mirror them. | Add `_elKeyedSamples` to MG; fire `KeyEventBus::keyUp()` inside `fillSamplesMono` when `_elSamplePos` crosses that boundary (latched per element via `_radioElementKeyed`). Reset `_wasElKeyDown = false` at the keyed-boundary keyUp so the next mark's keyDown is detected as a fresh edge by the existing `_wasElKeyDown` edge-detector. | `test_mg_keyed_boundary` |
 
 ## 7. Why host tests caught what device-only testing missed
 
@@ -337,5 +338,9 @@ The session added (or made robust) these tests:
 * `test_bridge_chunks_ending_at_mark_no_text_shift` — feeds
   `"AB CD EF GH"` in 5 chunks each ending at a MARK, asserts no
   shift. The most adversarial split for the boundary gap.
+* `test_mg_keyed_boundary` — pins the per-mark keyDown/keyUp edge
+  counts for OO/SS/AA/E/T (regression for the memory-keyer
+  radio-pulse-collapse bug). Verifies that the bus demand stays
+  balanced and never exceeds 1 across adjacent same-character marks.
 
-All six pass on the current code.
+All seven pass on the current code.

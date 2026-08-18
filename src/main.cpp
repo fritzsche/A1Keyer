@@ -6,7 +6,7 @@
  * Build with: pio run -e esp32p4_pioarduino  (Tab5)
  *              pio run -e esp32s3_cardputer   (Cardputer)
  */
-#define A1KEYER_VERSION "0.1.0"
+#define A1KEYER_VERSION "0.4.0"
 #include <M5Unified.h>
 #include <Preferences.h>
 #include <driver/gpio.h>

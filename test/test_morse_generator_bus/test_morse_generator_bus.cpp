@@ -97,7 +97,12 @@ static void test_no_double_down_across_TU() {
     MorseGenerator gen(&env, 20);
     armSpy();
 
-    // "TU" → DAH, ELEMENT_SPACE, DIT, CHAR_SPACE
+    // "TU" → DAH, CHAR_SPACE, DIT, DIT, DAH  (encoder dumps for "TU")
+//   (no ELEMENT_SPACE between the two DITs of U — the inter-element
+//    gap is the envelope's trailing silence, NOT a separate element.
+//    This is the same architecture that produced the bug: GPIO4 was
+//    staying HIGH through the env trailing, making the radio hear a
+//    single long dash instead of two short ones.)
     gen.playText("TU");
 
     // playText's advance set up DAH → one keyDown, bus count == 1.
@@ -108,32 +113,40 @@ static void test_no_double_down_across_TU() {
     drain(gen, env.ditLengthSamples());
     CHECK(!gen.isPlaying());
 
-    // Sequence of edges (playText + drain):
+    // Sequence of edges (playText + drain) with the keyed-boundary fix:
     //   DAH:        0→1  (playText's first advance fired down)
-    //   ELEMENT_SP: 1→0  (drain-to-end-of-DAH fired up)
-    //   DIT:        0→1  (drain-to-end-of-ELT_SP fired down — bus count NEVER exceeded 1)
-    //   CHAR_SPACE: 1→0  (natural completion fired up)
-    CHECK_EQ(2, downCount());
-    CHECK_EQ(2, upCount());
+    //   DAH at 3d:  1→0  (keyed-boundary keyUp fires at 3*ditLen;
+    //                       radio LOW for 1*ditLen env trailing silence)
+    //   CHAR_SPACE:    – (silence, radio stays LOW)
+    //   DIT:        0→1  (advance to DIT fires down — _wasElKeyDown was
+    //                       reset to false by the keyed-boundary keyUp,
+    //                       so the next mark sees a fresh rising edge)
+    //   DIT at 1d:  1→0  (keyed-boundary keyUp at 1*ditLen)
+    //   DIT:        0→1  (advance to next DIT fires down)
+    //   DIT at 1d:  1→0  (keyed-boundary keyUp at 1*ditLen)
+    //   DAH:        0→1  (advance to DAH fires down)
+    //   DAH at 3d:  1→0  (keyed-boundary keyUp at 3*ditLen)
+    //   exhausted:     – (radio already unkeyed, no extra up)
+    // Total: 4 downs + 4 ups. Bus demand NEVER exceeded 1.
+    CHECK_EQ(4, downCount());
+    CHECK_EQ(4, upCount());
     CHECK_EQ(0, KeyEventBus::demand());
 }
 
-// SOS = 9 marks across 3 characters. The encoder (see morse_encoder.cpp
-// §"Intra-element pause") does NOT emit ELEMENT_SPACE between marks of
-// the same character — the envelope's trailing silence covers that
-// gap, so adjacent same-character marks produce NO edge. The only
-// false-keyDown elements are CHAR_SPACE between characters, so:
-//   S first DIT:        DOWN  (edge false→true)
-//   S 2nd, 3rd DIT:     —     (no edge; still keyDown)
-//   CHAR_SPACE:         UP    (edge true→false)
+// SOS = 12 marks across 3 characters. With the keyed-boundary fix
+// (mirrors iambic_keyer.cpp), each mark fires its own keyDown + keyUp:
+//   S first DIT:        DOWN  (advance)
+//   S first DIT @ 1d:   UP    (keyed boundary)
+//   S 2nd, 3rd DIT:    DOWN+UP each
+//   CHAR_SPACE:         —     (silence, radio stays LOW)
 //   O first DAH:        DOWN
-//   O 2nd, 3rd DAH:     —
-//   CHAR_SPACE:         UP
+//   O first DAH @ 3d:   UP
+//   O 2nd, 3rd DAH:    DOWN+UP each
+//   CHAR_SPACE:         —
 //   S first DIT:        DOWN
-//   S 2nd, 3rd DIT:     —
-//   exhausted:          UP    (natural completion fires keyUp)
-// Total: 3 DOWN + 3 UP. Crucially, the bus demand must NEVER rise
-// above 1 — no double-down across adjacent marks.
+//   ... (3 more DITs, each DOWN+UP)
+//   exhausted:          —     (radio already unkeyed)
+// Total: 9 DOWNS + 9 UPS. Bus demand NEVER exceeded 1.
 static void test_no_double_down_across_NINE_marks() {
     KeyEnvelop env(20, 0.005f, 48000);
     MorseGenerator gen(&env, 20);
@@ -142,8 +155,8 @@ static void test_no_double_down_across_NINE_marks() {
     gen.playText("SOS");
     drain(gen, env.ditLengthSamples());
 
-    CHECK_EQ(3, downCount());
-    CHECK_EQ(3, upCount());
+    CHECK_EQ(9, downCount());
+    CHECK_EQ(9, upCount());
     CHECK_EQ(0, KeyEventBus::demand());
 }
 

@@ -141,6 +141,13 @@ private:
     // Current element info
     bool   _elKeyDown = false;
     int    _elRampSamples = 0;
+    // Number of samples within the current element during which the radio
+    // is keyed. Equals 1*ditLen for DIT, 3*ditLen for DAH; 0 for silence
+    // elements. The envelope extends past this for the trailing ramp-down
+    // + silence (DIT = 2*ditLen, DAH = 4*ditLen total), but that trailing
+    // portion must NOT keep the transmitter keyed. See iambic_keyer.cpp
+    // `_elementKeyedSamples` for the matching semantics on the paddle path.
+    int    _elKeyedSamples = 0;
 
     // Chunk-boundary tracking for inter-character silence. The
     // MorseEncoder only emits CHAR_SPACE *between* characters within
@@ -175,6 +182,12 @@ private:
     // drives advanceToNextElement. See morse_generator.cpp § Cross-
     // core invariant in the wiring block.
     bool   _wasElKeyDown = false;
+    // Per-element latch for the keyed-boundary keyUp() fire in
+    // fillSamplesMono. Set true when the keyed window ends; cleared
+    // when advanceToNextElement starts a new mark element. Prevents
+    // duplicate keyUp calls if the boundary is crossed more than once
+    // (shouldn't happen, but defensive).
+    bool   _radioElementKeyed = false;
 
     // When the bridge streams text in multiple chunks and the
     // prepend fires, the prepended CHAR_SPACE is purely an audio

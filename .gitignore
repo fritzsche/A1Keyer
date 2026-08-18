@@ -1,6 +1,7 @@
 .claude/
 .pio
 .vscode/
+.cache
 tmp
 tmp1
 # CMake build output

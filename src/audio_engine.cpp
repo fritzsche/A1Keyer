@@ -350,10 +350,6 @@ void AudioEngine::fillBuffer(int16_t* out, size_t stereoFrames) {
         }
     } else if (kt != KeyerType::STRAIGHT && s_keyer && (keyerHasMemory || s_keyer->isActive())) {
         // Iambic B keyer path — takes priority over MorseGenerator
-        static int dbg = 0;
-        if (++dbg % 100 == 0) {
-            Log::debug("[AE] keyer path: hasMemory=%d isActive=%d", keyerHasMemory, s_keyer->isActive());
-        }
         static int16_t mono[AUDIO_DMA_BUF_LEN];
         s_keyer->fillSamples(mono, stereoFrames,
                               s_toneFrequency, s_cachedAmplitude,
@@ -364,10 +360,6 @@ void AudioEngine::fillBuffer(int16_t* out, size_t stereoFrames) {
         }
     } else if (s_morseGen && s_morseGen->isPlaying()) {
         // MorseGenerator path — update encoder character for display
-        static int dbg = 0;
-        if (++dbg % 100 == 0) {
-            Log::debug("[AE] morseGen playing: char=%c", s_morseGen->currentChar());
-        }
         MorseModel::instance().setEncoderChar(s_morseGen->currentChar());
         static int16_t mono[AUDIO_DMA_BUF_LEN];
         s_morseGen->fillSamplesMono(mono, stereoFrames,

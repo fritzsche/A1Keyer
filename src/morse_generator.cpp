@@ -160,6 +160,8 @@ void MorseGenerator::playText(const char* text, bool isContinuation) {
     _elIdx = 0;
     _elSamplePos = 0;
     _currentChar = _playText.empty() ? '\0' : _playText[0];
+    _wasElKeyDown = false;
+    _radioElementKeyed = false;
     _phase = 0.0f;  // reset sine phase so next tone starts at zero
     _phaseInc = 0.0f;
     // CRITICAL ORDERING: set up the first element BEFORE flipping
@@ -171,9 +173,8 @@ void MorseGenerator::playText(const char* text, bool isContinuation) {
     // its own advance, it advances PAST the first mark into the
     // inter-character silence, and the audio task's already-running
     // fillSamplesMono now produces silence + U — i.e. T is inaudible.
-    // Captured by `[MG-DIAG-FS]` on hardware repro (2026-08). Fix: do
-    // the advance FIRST, then publish PLAYING. Audio task that preempts
-    // mid-advance will still see `state != PLAYING` (we haven't
+    // Fix: do the advance FIRST, then publish PLAYING. Audio task that
+    // preempts mid-advance will still see `state != PLAYING` (we haven't
     // published yet) and bail out via the IDLE/END branch.
     MorseModel::instance().resetPlayerHead();  // fresh session, reset player color tracking
     // Advance FIRST, before publishing PLAYING. This sets up _elKeyDown,
@@ -188,52 +189,8 @@ void MorseGenerator::playText(const char* text, bool isContinuation) {
     if (!_elements.empty()) {
         _state = State::PLAYING;  // publish AFTER first element is set up
     }
-    // DIAGNOSTIC: first-play trace. Captures the entire state vector
-    // that determines what audio the very first playText after boot
-    // will produce. Useful when the "first TU sounds like X" bug
-    // reproduces on hardware — log grep `[MG-DIAG]` shows exactly
-    // what the encoder emitted and what WPM the generator is using.
-    static int s_playTextCallNo = 0;
-    int callNo = ++s_playTextCallNo;
-    if (callNo <= 5) {
-        Log::write("[MG-DIAG] playText#%d text=\"%s\" elts=%zu prepend=%d "
-                   "genWpm=%d encWpm=%d envWpm=%d envDitLen=%d envSampleRate=%d "
-                   "isContinuation=%d _endedWithBoundarySilence(before)=%d\n",
-            callNo, _playText.c_str(), (unsigned)_elements.size(), (int)didPrepend,
-            _wpm, _encoder.wpm(), _env->wpm(),
-            (int)_env->ditLengthSamples(), (int)_env->sampleRate(),
-            (int)isContinuation, (int)wasBoundaryBefore);
-        // Dump each element so we can see exactly what the encoder produced.
-        for (size_t i = 0; i < _elements.size(); ++i) {
-            const auto& e = _elements[i];
-            const char* tname =
-                (e.type == MorseEncoder::Element::DIT)       ? "DIT" :
-                (e.type == MorseEncoder::Element::DAH)       ? "DAH" :
-                (e.type == MorseEncoder::Element::CHAR_SPACE) ? "CHAR_SP" :
-                (e.type == MorseEncoder::Element::WORD_SPACE) ? "WORD_SP" :
-                                                                 "ELT_SP";
-            Log::write("[MG-DIAG]   elt[%zu] type=%s units=%d keyDown=%d\n",
-                (unsigned)i, tname, (int)e.units, (int)e.keyDown);
-        }
-    } else {
-        Log::write("[MG] playText: text=\"%s\" elements=%zu\n",
-                      _playText.c_str(), (unsigned)_elements.size());
-    }
     // (resetPlayerHead + advanceToNextElement moved above, BEFORE
     // `_state = PLAYING`, to close the audio-task race.)
-    if (callNo <= 5) {
-        Log::write("[MG-DIAG] playText#%d after advance: elIdx=%zu elKeyDown=%d "
-                   "elSamplePos=%d elTotalSamples=%d currentChar='%c'(%d)\n",
-            callNo, (unsigned)_elIdx, (int)_elKeyDown,
-            _elSamplePos, _elTotalSamples,
-            (int)_currentChar >= 32 ? (int)_currentChar : '?',
-            (int)(unsigned char)_currentChar);
-    } else {
-        Log::write("[MG] after advance: currentChar='%c'(%d) isPlaying=%d\n",
-            (int)_currentChar >= 32 ? (int)_currentChar : '?',
-            (int)(unsigned char)_currentChar,
-            (int)(_state != State::IDLE));
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +206,7 @@ void MorseGenerator::stop() {
     // fresh without a synthetic leading CHAR_SPACE.
     _wasPlaying = false;
     _endedWithBoundarySilence = false;
+    _radioElementKeyed = false;
     // Unkey the radio if we were mid-mark. Always safe — the bus
     // saturates the refcount at 0 so extra keyUp() calls are no-ops.
     if (_wasElKeyDown) {
@@ -315,8 +273,11 @@ void MorseGenerator::advanceToNextElement() {
     //
     // The edge detector itself is plain `bool` — see the cross-core
     // invariant comment block at the top of this file.
-    if (_elKeyDown && !_wasElKeyDown)      KeyEventBus::keyDown();
-    else if (!_elKeyDown && _wasElKeyDown) KeyEventBus::keyUp();
+    if (_elKeyDown && !_wasElKeyDown) {
+        KeyEventBus::keyDown();
+    } else if (!_elKeyDown && _wasElKeyDown) {
+        KeyEventBus::keyUp();
+    }
     _wasElKeyDown = _elKeyDown;
 
     // Screensaver wake-up: mirror the paddle-ISR behaviour
@@ -339,6 +300,18 @@ void MorseGenerator::advanceToNextElement() {
         _currentEnvSize = _env->envelopeSize(elType);
         _elRampSamples = static_cast<int>(_env->rampLengthSamples());
         _elTotalSamples = static_cast<int>(_currentEnvSize);
+        // Radio keying window: DIT = 1*ditLen, DAH = 3*ditLen. The envelope
+        // continues for the trailing ramp-down + 1-unit silence (DIT total =
+        // 2*ditLen, DAH total = 4*ditLen), but that trailing portion must
+        // NOT keep the transmitter keyed. Matches iambic_keyer.cpp
+        // `_elementKeyedSamples`. Without this, "OO" keys GPIO4 HIGH for the
+        // entire 480 ms (3 DAH envelopes back-to-back, no inter-element gap
+        // in the encoder), and the radio hears a single long dash instead
+        // of three.
+        int ditLen = _env->ditLengthSamples();
+        _elKeyedSamples = (el.type == MorseEncoder::Element::DIT) ? ditLen : (3 * ditLen);
+        _radioElementKeyed = false;  // arm the keyed-boundary keyUp() latch
+                                       // for this new element
         // BUGFIX: the encoder emits one WORD_SPACE per ASCII space in the
         // source text. The silence branch only advances _charIdx by one
         // position per silence element, so _charIdx can still point at a
@@ -377,6 +350,7 @@ void MorseGenerator::advanceToNextElement() {
         _currentEnv = nullptr;
         _currentEnvSize = 0;
         _elRampSamples = 0;
+        _elKeyedSamples = 0;  // silence: radio stays unkeyed
 
         // WORD_SPACE or CHAR_SPACE marks end of current character
         if (el.type == MorseEncoder::Element::WORD_SPACE || el.type == MorseEncoder::Element::CHAR_SPACE) {
@@ -480,26 +454,6 @@ void MorseGenerator::fillSamplesMono(int16_t* mono,
     static int16_t s_prevSample  = 0;
     static uint32_t s_clickCount = 0;
 
-    // DIAGNOSTIC: one-shot trace of the very first fillSamplesMono call
-    // after construction. Captures what the audio task sees on its very
-    // first iteration — useful when the audio task preempts playText()
-    // before advanceToNextElement() finishes setting up the first
-    // element. Grep `[MG-DIAG-FS]` in device logs to find this.
-    static bool s_firstFillLogged = false;
-    if (!s_firstFillLogged) {
-        s_firstFillLogged = true;
-        Log::write("[MG-DIAG-FS] first fillSamplesMono call: state=%d "
-                   "_elKeyDown=%d _elSamplePos=%d _elTotalSamples=%d "
-                   "_elIdx=%zu _elements.size=%zu _currentEnv=%p "
-                   "_currentChar='%c'(%d) _phase=%.4f _phaseInc=%.6f\n",
-            (int)_state, (int)_elKeyDown, _elSamplePos, _elTotalSamples,
-            (unsigned)_elIdx, (unsigned)_elements.size(),
-            (const void*)_currentEnv,
-            (int)_currentChar >= 32 ? (int)_currentChar : '?',
-            (int)(unsigned char)_currentChar,
-            _phase, _phaseInc);
-    }
-
     for (size_t i = 0; i < frames; ++i) {
         float sample = 0.0f;
 
@@ -511,6 +465,26 @@ void MorseGenerator::fillSamplesMono(int16_t* mono,
                     envVal = _currentEnv[_elSamplePos];
                 }
                 sample = envVal * fastSinNormalized(_phase);
+                // Radio keying: drop the line at the END of the keyed
+                // portion of the element, NOT at the envelope boundary
+                // (which includes the trailing ramp-down + 1-unit silence
+                // that must NOT keep the transmitter keyed). Mirrors
+                // iambic_keyer.cpp `_elementKeyedSamples`. Latched per
+                // element: _wasElKeyDown is updated by advanceToNextElement
+                // and would normally produce the same edge there, but the
+                // envelope continues past the keyed window, so we fire
+                // here instead.
+                if (!_radioElementKeyed && _elKeyedSamples > 0
+                    && _elSamplePos + 1 >= _elKeyedSamples) {
+                    KeyEventBus::keyUp();
+                    _radioElementKeyed = true;
+                    // Mirror the radio state into _wasElKeyDown so the
+                    // NEXT advanceToNextElement sees a proper edge when
+                    // the next mark element starts (otherwise it would
+                    // see _wasElKeyDown still true and skip the keyDown
+                    // edge, leaving the radio LOW for the next mark).
+                    _wasElKeyDown = false;
+                }
             }
             // Advance counter for both tone and silence elements
             if (++_elSamplePos >= _elTotalSamples) {

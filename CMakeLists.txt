@@ -55,6 +55,9 @@ foreach(SUITE IN ITEMS
     test_morse_generator_bus
     test_winkey_playback
     test_network_manager
+    test_diag_memory_radio
+    test_diag_iambic_collision
+    test_mg_keyed_boundary
 )
     add_executable(${SUITE}
         test/${SUITE}/${SUITE}.cpp
