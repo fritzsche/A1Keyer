@@ -671,6 +671,13 @@ button.primary{background:var(--accent);color:#0e1116;border-color:var(--accent)
         var inp = document.createElement("input");
         inp.type = "text"; inp.maxLength = 80; inp.id = "mem-" + i;
         inp.value = arr[i] || "";
+        // Track local edits so the periodic /state poll doesn't stamp
+        // over typing-in-progress. Cleared on successful /api/memory
+        // save (see bindMemory below).
+        inp.dataset.dirty = "0";
+        inp.addEventListener("input", function(ev){
+          ev.target.dataset.dirty = "1";
+        });
         var play = document.createElement("button");
         play.type = "button";
         play.textContent = "▶";
@@ -688,7 +695,21 @@ button.primary{background:var(--accent);color:#0e1116;border-color:var(--accent)
     } else {
       for (var j = 0; j < need; j++){
         var f = $("mem-" + j);
-        if (f && f.value !== (arr[j] || "")) f.value = arr[j] || "";
+        if (f) {
+          // Preserve in-progress edits: the device hasn't seen them
+          // yet (we haven't POSTed), so the polled state will still
+          // match the pre-edit value and we'd otherwise wipe the
+          // user's typing every 500 ms.
+          if (f.dataset.dirty !== "1" && f.value !== (arr[j] || "")) {
+            f.value = arr[j] || "";
+          }
+          // If the server caught up to what the user has typed
+          // (e.g. after Save), drop the dirty flag so future polls
+          // can sync again.
+          if (f.dataset.dirty === "1" && f.value === (arr[j] || "")) {
+            f.dataset.dirty = "0";
+          }
+        }
         // Update the play button's disabled state to match the slot content.
         var rows = list.children;
         if (rows && rows[j]) {
@@ -790,7 +811,12 @@ button.primary{background:var(--accent);color:#0e1116;border-color:var(--accent)
         t.disabled = false;
         t.textContent = "Save";
         if (!res.ok) showBanner("Memory save failed (HTTP " + res.status + ")");
-        else pollState();
+        else {
+          // The server now matches the input — drop the dirty flag so
+          // the next /state poll can sync this slot again.
+          input.dataset.dirty = "0";
+          pollState();
+        }
       }).catch(function(){
         t.disabled = false;
         t.textContent = "Save";
