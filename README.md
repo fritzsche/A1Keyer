@@ -1,9 +1,9 @@
 # A1Keyer
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Changelog](https://img.shields.io/badge/changelog-0.4.0-blue.svg)](CHANGELOG.md)
+[![Changelog](https://img.shields.io/badge/changelog-0.5.0-blue.svg)](CHANGELOG.md)
 [![Web Flasher](https://img.shields.io/badge/Web_Flasher-flash%20in%20browser-orange)](https://fritzsche.github.io/A1Keyer-Flasher/)
-[![Version](https://img.shields.io/badge/version-0.4.0-green.svg)](#version)
+[![Version](https://img.shields.io/badge/version-0.5.0-green.svg)](#version)
 
 Low-latency Morse code trainer and **computer-controlled CW keyer** for the
 **M5Stack Cardputer ADV**. Plug in a paddle or a straight key, send CW, hear
@@ -12,7 +12,7 @@ audio latency end-to-end. Key your transceiver through an isolated
 optocoupler, drive CW from your logger via **WinKey (WK2) emulation** over
 USB, store ten CW memories, and configure everything either from the
 built-in keyboard or from the **web interface** over Wi-Fi.
-**Current release: v0.4.0.**
+**Current release: v0.5.0.**
 
 ---
 
@@ -80,7 +80,8 @@ customisation, or to target a different environment — see
 
 | Version | Date | Highlights |
 |---|---|---|
-| **[v0.4.0](https://github.com/fritzsche/A1Keyer/releases)** | *current* | **WinKey WK2 emulation** over USB (logger-driven CW, RUMlogNG/N1MM/fldigi/WriteLog), **CW memory keyer** (10 slots, keyboard + web editing/playback), **on-device web interface** (settings + live decode view over Wi-Fi), **paddle polarity setting**, robust Wi-Fi provisioning. |
+| **[v0.5.0](https://github.com/fritzsche/A1Keyer/releases)** | *current* | **AP mode** (press `A` to turn the device into a Wi-Fi access point), **forget-confirmation** on STA X key, **paddle polarity setting** (`S` key, Normal/Reversed), on-device web interface, WinKey WK2 emulation, CW memory keyer (10 slots). |
+| **[v0.4.0](https://github.com/fritzsche/A1Keyer/releases)** | *2026-08-18* | **WinKey WK2 emulation** over USB (logger-driven CW, RUMlogNG/N1MM/fldigi/WriteLog), **CW memory keyer** (10 slots, keyboard + web editing/playback), **on-device web interface** (settings + live decode view over Wi-Fi), **paddle polarity setting**, robust Wi-Fi provisioning. |
 | **[v0.3.0](https://github.com/fritzsche/A1Keyer/releases/tag/v0.3.0)** | *2026-08-13* | Bugfix release: Wi-Fi credentials persist across failed connects and reboots. |
 | **[v0.2.0](https://github.com/fritzsche/A1Keyer/releases/tag/v0.2.0)** | *2026-08-13* | On-device Wi-Fi configuration (scan / password / forget), passphrase masking, HTTP state console. |
 | **[v0.1.0](https://github.com/fritzsche/A1Keyer/releases/tag/v0.1.0)** | *2026-06-14* | Initial public release: iambic B + straight key + decoder + text encoder, radio keying output, web flasher. |
@@ -188,9 +189,6 @@ The DAH pin (yellow, GPIO2) is **not used** in straight-key mode.
 > **A1Keyer does not auto-detect which key is connected.** After
 > flashing, set the keyer type once to match your hardware — open the
 > web interface (*Settings → Keyer type → Iambic paddle / Straight key*).
-> In v0.4.0 there is no keyboard shortcut for paddle-vs-straight; the
-> web interface is the only place to switch it. See
-> [Wi-Fi and the web interface](#wi-fi-and-the-web-interface) below.
 
 ---
 

@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+_(none)_
+
+## [0.5.0] - 2026-08-24
+
+### Added
+- **Access-point (AP) mode — press `A` to turn the Cardputer into a
+  Wi-Fi access point.** The device announces the fixed SSID `A1Keyer` on
+  `192.168.73.1/24` (DHCP-leases `.2..N`, defaulting to `4` clients).
+  A password editor opens automatically on the first press; the passphrase
+  is persisted to NVS so reboots do not require retyping. Press `N` to
+  see the connected-station count. AP mode coexists with the existing STA
+  mode — each has its own NVS key and the mode itself is persisted, so
+  a reboot comes back in the mode the user last chose.
+- **Forget-confirmation overlay on the network-info screen.** In STA mode,
+  pressing `X` now opens a Y/N modal that prevents accidental credential
+  deletion. In AP mode, `X` drops the AP without erasing the passphrase
+  (and without touching STA credentials). See `docs/network.md § 13`.
 - **Paddle polarity setting (`S`) — Normal / Reversed.** Press `S` on the
   decoder screen to open the **POLARITY** overlay, `;` for Normal, `.` for
   Reversed, `Enter` to save. When Reversed, the physical dit lever sounds a
@@ -234,6 +251,7 @@ This release ships a pre-built binary for the **Cardputer ADV (ESP32-S3)** only.
 ### Repository hygiene
 - `.vscode/` and `extern/` are not tracked by Git (kept locally, ignored via `.gitignore`).
 
-[0.1.0]: https://github.com/fritzsche/A1Keyer/releases/tag/v0.1.0
-[0.2.0]: https://github.com/fritzsche/A1Keyer/releases/tag/v0.2.0
+[0.5.0]: https://github.com/fritzsche/A1Keyer/releases/tag/v0.5.0
 [0.3.0]: https://github.com/fritzsche/A1Keyer/releases/tag/v0.3.0
+[0.2.0]: https://github.com/fritzsche/A1Keyer/releases/tag/v0.2.0
+[0.1.0]: https://github.com/fritzsche/A1Keyer/releases/tag/v0.1.0
