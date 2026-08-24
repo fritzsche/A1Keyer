@@ -319,6 +319,38 @@ void MorseModel::setWifiCredSource(int s) {
     incrementChangeCounter();
 }
 
+int MorseModel::wifiMode() const { return _wifiMode.load(std::memory_order_relaxed); }
+void MorseModel::setWifiMode(int m) {
+    if (_wifiMode.load(std::memory_order_relaxed) == m) return;
+    _wifiMode.store(m, std::memory_order_relaxed);
+    incrementChangeCounter();
+}
+
+int MorseModel::wifiApStations() const { return _wifiApStations.load(std::memory_order_relaxed); }
+void MorseModel::setWifiApStations(int n) {
+    if (n < 0) n = 0;
+    if (_wifiApStations.load(std::memory_order_relaxed) == n) return;
+    _wifiApStations.store(n, std::memory_order_relaxed);
+    incrementChangeCounter();
+}
+
+int MorseModel::wifiApMaxStations() const { return _wifiApMaxStations.load(std::memory_order_relaxed); }
+void MorseModel::setWifiApMaxStations(int n) {
+    if (n <= 0) n = 1;
+    if (_wifiApMaxStations.load(std::memory_order_relaxed) == n) return;
+    _wifiApMaxStations.store(n, std::memory_order_relaxed);
+}
+
+bool MorseModel::wifiNetConfirmForget() const {
+    return _wifiNetConfirmForget.load(std::memory_order_relaxed);
+}
+void MorseModel::setWifiNetConfirmForget(bool v) {
+    bool cur = _wifiNetConfirmForget.load(std::memory_order_relaxed);
+    if (cur == v) return;
+    _wifiNetConfirmForget.store(v, std::memory_order_relaxed);
+    incrementChangeCounter();
+}
+
 uint32_t MorseModel::wifiSecondsUntilRetry() const {
     return _wifiSecondsUntilRetry.load(std::memory_order_relaxed);
 }
@@ -386,6 +418,7 @@ void MorseModel::wifiResetUIState() {
     setWifiScanCursor(0);
     setWifiScanTop(0);
     wifiClearPassword();
+    setWifiNetConfirmForget(false);
 }
 
 // ─── Memory-keyer accessors ──────────────────────────────────────────────────

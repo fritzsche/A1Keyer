@@ -258,10 +258,70 @@ static void handleWifiScreen(MorseModel& model, const CardputerKeyState& ks) {
         return;
     }
 
+    if (sc == DisplayScreen::WIFI_AP_PASSWORD_INPUT) {
+        // Mirrors the STA password editor. Differences:
+        //   - No scan-cursor (SSID is fixed).
+        //   - ENTER calls startAp() rather than connect().
+        //   - The DECODER→AP-password transition is triggered by a
+        //     printable key (A) — without priming ks.printable on the
+        //     transition tick, the still-held 'a' would slip through
+        //     TextInput::feed() and appear as the first character of
+        //     the just-opened editor. primeEnterHeld() covers the
+        //     matching edge for the STA flow (triggered by Enter on
+        //     the scan list).
+        static bool wasOpt = false, wasLeft = false, wasRight = false;
+        TextInput* ti = model.passwordInput();
+        if (screenJustChanged) {
+            wasOpt = ks.opt; wasLeft = ks.left; wasRight = ks.right;
+            // Discard the printable that triggered the transition so
+            // the field opens empty. The user explicitly said this
+            // was confusing — the editor should not silently accept
+            // the keypress that opened it.
+            if (ks.printable) ti->primePrintableHeld(ks.printable);
+        }
+
+        const bool optEdge = ks.opt && !wasOpt;
+        wasOpt = ks.opt;
+        if (optEdge) {
+#ifdef BOARD_CARDPUTER
+            M5Cardputer.Keyboard.setCapsLocked(
+                !M5Cardputer.Keyboard.capslocked());
+#endif
+            DisplayTask::requestRender();
+        }
+
+        bool cursorMoved = false;
+        if (ks.left  && !wasLeft)  { ti->moveCursor(-1); cursorMoved = true; }
+        if (ks.right && !wasRight) { ti->moveCursor(+1); cursorMoved = true; }
+        wasLeft  = ks.left;
+        wasRight = ks.right;
+
+        CardputerKeyState ksForEditor = ks;
+        if (cursorMoved) ksForEditor.printable = 0;
+
+        const TextInput::Result r = ti->feed(ksForEditor);
+        if (r == TextInput::Result::ENTER) {
+            WifiMgr::startAp(ti->value());
+            model.wifiClearPassword();
+            model.setScreen(DisplayScreen::WIFI_NETWORK_INFO);
+            DisplayTask::requestRender();
+        } else if (r == TextInput::Result::ESC) {
+            model.wifiClearPassword();
+            model.setScreen(DisplayScreen::DECODER);
+            DisplayTask::requestRender();
+        } else if (cursorMoved || r == TextInput::Result::CHANGED) {
+            DisplayTask::requestRender();
+        }
+        return;
+    }
+
     if (sc == DisplayScreen::WIFI_NETWORK_INFO) {
         static bool wasX = false, wasR = false, wasEnter = false, wasEsc = false;
+        static bool wasY = false, wasN = false;
         const bool xKey  = ks.printable == 'x' || ks.printable == 'X';
         const bool rKey  = ks.printable == 'r' || ks.printable == 'R';
+        const bool yKey  = ks.printable == 'y' || ks.printable == 'Y';
+        const bool nKey  = ks.printable == 'n' || ks.printable == 'N';
         const bool enter = ks.enter;
         const bool esc   = ks.escape;
         if (screenJustChanged) {
@@ -276,10 +336,43 @@ static void handleWifiScreen(MorseModel& model, const CardputerKeyState& ks) {
             // connecting state for one tick at most before the device
             // silently bailed out of the wifi flow.
             wasX = xKey; wasR = rKey; wasEnter = enter; wasEsc = esc;
+            wasY = yKey; wasN = nKey;
+        }
+
+        const bool apMode = model.wifiMode() == (int)NetMode::ACCESS_POINT;
+
+        if (model.wifiNetConfirmForget()) {
+            // Modal Y/N overlay is up. Only Y/N/ESC do anything —
+            // any other key (including X and R, the ones that would
+            // normally fire on this screen) is ignored so the user
+            // cannot accidentally erase the credentials.
+            if (yKey && !wasY) {
+                WifiMgr::disconnectAndForget();
+                model.setWifiNetConfirmForget(false);
+                DisplayTask::requestRender();
+            } else if (nKey && !wasN) {
+                model.setWifiNetConfirmForget(false);
+                DisplayTask::requestRender();
+            } else if (esc && !wasEsc) {
+                model.setWifiNetConfirmForget(false);
+                DisplayTask::requestRender();
+            }
+            wasX = xKey; wasR = rKey; wasEnter = enter; wasEsc = esc;
+            wasY = yKey; wasN = nKey;
+            return;
         }
 
         if (xKey && !wasX) {
-            WifiMgr::disconnectAndForget();
+            if (apMode) {
+                // Drop the AP only. AP password stays in NVS so the
+                // user can press A again without retyping. STA creds
+                // are untouched.
+                WifiMgr::disconnectCurrent();
+            } else {
+                // STA: destructive — open the Y/N ask. STA creds are
+                // the only thing erased.
+                model.setWifiNetConfirmForget(true);
+            }
             DisplayTask::requestRender();
         }
         if (rKey && !wasR) {
@@ -307,6 +400,7 @@ static void handleWifiScreen(MorseModel& model, const CardputerKeyState& ks) {
             DisplayTask::requestRender();
         }
         wasX = xKey; wasR = rKey; wasEnter = enter; wasEsc = esc;
+        wasY = yKey; wasN = nKey;
         return;
     }
 }
@@ -325,6 +419,9 @@ static void mirrorWifiState(MorseModel& model) {
     model.setWifiCredSource((int)WifiMgr::credentialSource());
     model.setWifiSecondsUntilRetry(WifiMgr::secondsUntilRetry());
     model.setWifiScanCount(WifiMgr::scanCount());
+    model.setWifiMode((int)WifiMgr::mode());
+    model.setWifiApStations((int)WifiMgr::apStations());
+    model.setWifiApMaxStations(WifiMgr::kApMaxStations);
 }
 
 // ---------------------------------------------------------------------------
@@ -595,7 +692,7 @@ static void handleKeyboard() {
     static bool wasW = false, wasF = false, wasP = false, wasV = false, wasM = false;
     static bool wasK = false;
     static bool wasD = false;
-    static bool wasC = false, wasN = false;
+    static bool wasC = false, wasN = false, wasA = false;
     static bool wasS = false;
     static bool wasEnter = false, wasShift = false;
     static bool wasBtnA = false;
@@ -616,6 +713,7 @@ static void handleKeyboard() {
     bool dKey       = kb.isKeyPressed('D') || kb.isKeyPressed('d');
     bool cKey       = kb.isKeyPressed('C') || kb.isKeyPressed('c');
     bool nKey       = kb.isKeyPressed('N') || kb.isKeyPressed('n');
+    bool aKey       = kb.isKeyPressed('A') || kb.isKeyPressed('a');
     bool sKey       = kb.isKeyPressed('S') || kb.isKeyPressed('s');
     bool enter      = kb.isKeyPressed(KEY_ENTER);
     bool shift      = kb.keysState().shift;
@@ -650,17 +748,18 @@ static void handleKeyboard() {
         (cKey   ? 0x10 : 0) +
         (nKey   ? 0x20 : 0) +
         (wKey   ? 0x40 : 0) +
-        (enter  ? 0x80 : 0) +
-        (semicolon ? 0x100 : 0) +
-        (period    ? 0x200 : 0) +
-        (sKey      ? 0x400 : 0) +
-        ((unsigned)pollKeys().printable << 11);
+        (aKey   ? 0x80 : 0) +
+        (enter  ? 0x100 : 0) +
+        (semicolon ? 0x200 : 0) +
+        (period    ? 0x400 : 0) +
+        (sKey      ? 0x800 : 0) +
+        ((unsigned)pollKeys().printable << 12);
     if (keyStateHash != s_lastKeyState) {
         s_lastKeyState = keyStateHash;
-        Log::write("[KB-NEW] list=%d printable=%02x pKey=%d mKey=%d kKey=%d dKey=%d cKey=%d nKey=%d wKey=%d sKey=%d enter=%d semi=%d period=%d sc=%d\n",
+        Log::write("[KB-NEW] list=%d printable=%02x pKey=%d mKey=%d kKey=%d dKey=%d cKey=%d nKey=%d aKey=%d wKey=%d sKey=%d enter=%d semi=%d period=%d sc=%d\n",
             (int)kb.keyList().size(),
             (unsigned)pollKeys().printable,
-            pKey, mKey, kKey, dKey, cKey, nKey, wKey, sKey,
+            pKey, mKey, kKey, dKey, cKey, nKey, aKey, wKey, sKey,
             enter, semicolon, period, (int)sc);
     }
 
@@ -674,8 +773,8 @@ static void handleKeyboard() {
     // cut off audio after only a click of the first element.
     static bool s_wasAnyKeyHeld = false;
     const bool anyKeyHeld = wKey || fKey || pKey || vKey || mKey
-                          || kKey || dKey || cKey || nKey || sKey || enter
-                          || semicolon || period;
+                          || kKey || dKey || cKey || nKey || aKey || sKey
+                          || enter || semicolon || period;
     const bool anyKeyEdge = anyKeyHeld && !s_wasAnyKeyHeld;
     s_wasAnyKeyHeld = anyKeyHeld;
 
@@ -689,7 +788,7 @@ static void handleKeyboard() {
         // Same press still held — consume it: update wasX so the per-key
         // edge handlers below don't fire on this held press.
         wasW = wKey; wasF = fKey; wasP = pKey; wasV = vKey; wasM = mKey;
-        wasK = kKey; wasD = dKey; wasC = cKey; wasN = nKey; wasS = sKey;
+        wasK = kKey; wasD = dKey; wasC = cKey; wasN = nKey; wasA = aKey; wasS = sKey;
         wasEnter = enter; wasShift = shift; wasBtnA = btnA;
         wasSemicolon = semicolon; wasPeriod = period;
         return;
@@ -776,10 +875,17 @@ static void handleKeyboard() {
     }
     wasD = dKey;
 
-    // C → Wi-Fi scan list. Only fires from DECODER (so a stray C inside
-    // another overlay cannot interrupt it). On entry, kicks off an async
-    // scan — never blocks the keyer.
+    // C → Wi-Fi scan list (STA mode). Only fires from DECODER (so a
+    // stray C inside another overlay cannot interrupt it). On entry,
+    // kicks off an async scan — never blocks the keyer.
+    //
+    // If the device is currently in AP mode, stop the AP first so the
+    // STA flow can take over without the radio being held in the wrong
+    // role by the driver.
     if (cKey && !wasC && model.screen() == DisplayScreen::DECODER) {
+        if (WifiMgr::mode() == NetMode::ACCESS_POINT) {
+            WifiMgr::disconnectCurrent();    // stop AP, keep AP pw in NVS
+        }
         model.wifiResetUIState();
         WifiMgr::startScan();
         model.setScreen(DisplayScreen::WIFI_SCAN_LIST);
@@ -787,6 +893,33 @@ static void handleKeyboard() {
         DisplayTask::requestRender();
     }
     wasC = cKey;
+
+    // A → AP setup. Only fires from DECODER. Two cases:
+    //   - AP not running: open the AP password editor. ENTER starts it.
+    //   - AP already up: jump straight to the status screen (lets the
+    //     user peek at the clients count without re-entering the pw).
+    if (aKey && !wasA && model.screen() == DisplayScreen::DECODER) {
+        const bool apLive = (WifiMgr::mode() == NetMode::ACCESS_POINT) &&
+                            (WifiMgr::state() == NetState::AP_UP ||
+                             WifiMgr::state() == NetState::AP_STARTING);
+        if (apLive) {
+            model.setScreen(DisplayScreen::WIFI_NETWORK_INFO);
+        } else {
+            // Make sure no STA attempt is in flight before we tear
+            // down its interface and bring up the AP.
+            WifiMgr::cancel();
+            model.wifiResetUIState();
+            model.passwordInput()->clear();
+            // Same edge-priming trick as the STA password screen —
+            // ENTER is consumed by TextInput::feed() so we must tell
+            // the editor it was already held on entry.
+            model.passwordInput()->primeEnterHeld();
+            model.setScreen(DisplayScreen::WIFI_AP_PASSWORD_INPUT);
+        }
+        model.setOverlayStartMillis(millis());
+        DisplayTask::requestRender();
+    }
+    wasA = aKey;
 
     // N → Wi-Fi network info / status. Same gate as C: only from DECODER.
     if (nKey && !wasN && model.screen() == DisplayScreen::DECODER) {
@@ -926,7 +1059,9 @@ static void handleKeyboard() {
     // did not fire.
     else if (model.screen() == DisplayScreen::WIFI_SCAN_LIST ||
              model.screen() == DisplayScreen::WIFI_PASSWORD_INPUT ||
-             model.screen() == DisplayScreen::WIFI_NETWORK_INFO) {
+             model.screen() == DisplayScreen::WIFI_AP_PASSWORD_INPUT ||
+             model.screen() == DisplayScreen::WIFI_NETWORK_INFO ||
+             model.screen() == DisplayScreen::WIFI_NETWORK_INFO_CONFIRM) {
         handleWifiScreen(model, pollKeys());
     }
     // Memory-keyer screens: dedicated handlers. Same pattern as Wi-Fi.
@@ -997,7 +1132,9 @@ static void handleKeyboard() {
     const bool onWifiScreen =
         model.screen() == DisplayScreen::WIFI_SCAN_LIST ||
         model.screen() == DisplayScreen::WIFI_PASSWORD_INPUT ||
-        model.screen() == DisplayScreen::WIFI_NETWORK_INFO;
+        model.screen() == DisplayScreen::WIFI_AP_PASSWORD_INPUT ||
+        model.screen() == DisplayScreen::WIFI_NETWORK_INFO ||
+        model.screen() == DisplayScreen::WIFI_NETWORK_INFO_CONFIRM;
     const bool onMemoryScreen =
         model.screen() == DisplayScreen::MEMORY_PICK ||
         model.screen() == DisplayScreen::MEMORY_EDIT;
@@ -1190,8 +1327,14 @@ void setup() {
     WifiMgr::bindPlatformHal();
     WifiMgr::begin();
 
-    if (WifiMgr::hasSavedCredentials()) {
+    if (WifiMgr::mode() == NetMode::STATION && WifiMgr::hasSavedCredentials()) {
         WifiMgr::connectWithSaved();
+    }
+    // AP-mode boot: nothing automatic. The user pressed A to set this
+    // up explicitly; they can also reach the status screen at any
+    // time with the A key to inspect the running AP.
+    if (WifiMgr::mode() == NetMode::ACCESS_POINT) {
+        Log::info("[setup] AP mode boot; press 'A' to start or 'C' for STA");
     }
 
     // Register HTTP routes. The listener itself starts lazily from

@@ -107,6 +107,7 @@ void handleState() {
     body += ",\"keyerPatternPercent\":"; body += m.keyerPatternPercent();
     body += ",\"encoderChar\":\"";   if (m.encoderChar()) body += m.encoderChar(); body += '"';
     body += ",\"wifiIP\":\"";        body += ipStr; body += '"';
+    body += ",\"wifiMode\":\"";      body += (WifiMgr::mode() == NetMode::ACCESS_POINT) ? "ap" : "sta"; body += '"';
 
     if (wk) {
         body += ",\"winkeyOpen\":";       body += wk->isOpen() ? "true" : "false";

@@ -26,6 +26,7 @@ with the web flasher and never touch a compiler.
 10. [Interaction with the web flasher](#10-interaction-with-the-web-flasher)
 11. [Design decisions and rejected alternatives](#11-design-decisions-and-rejected-alternatives)
 12. [Future work](#12-future-work)
+13. [Access-point mode](#13-access-point-mode)
 
 ---
 
@@ -33,16 +34,21 @@ with the web flasher and never touch a compiler.
 
 - **Function:** associate with a Wi-Fi access point as a station (STA),
   obtain an address by DHCP, and keep the link up across reboots and
-  dropouts.
+  dropouts. **Or** turn the device itself into a Wi-Fi access point
+  (AP), with a fixed SSID and a user-chosen passphrase. See
+  [§13](#13-access-point-mode).
 - **Configuration:** on-device. Press `C` to scan, pick an AP from the
   list, type the password on the built-in keyboard, connect.
+  Press `A` to enter access-point mode (password entry is reused for
+  the AP passphrase).
 - **Persistence:** credentials are stored in NVS and re-applied on every
-  boot. The device auto-connects unattended.
-- **Status:** press `N` for state, SSID, IP address, or the reason the
-  last attempt failed. Disconnect and forget the network from the same
-  screen.
-- **Default:** **Off**. A device with no stored credentials keeps the
-  radio powered down and never associates.
+  boot. The device auto-connects in STA mode unattended; in AP mode the
+  saved passphrase is reused so reboots do not require retyping.
+- **Status:** press `N` for state, SSID, IP address, and (in AP mode)
+  the count of connected stations. Disconnect from the same screen.
+- **Default:** **Off**. A device with no stored credentials and no
+  explicit AP-mode boot keeps the radio powered down and never
+  associates.
 - **Target:** M5Stack Cardputer ADV. The Tab5 (ESP32-P4) build compiles
   the UI out; the network layer itself is portable.
 
@@ -56,25 +62,26 @@ with the web flasher and never touch a compiler.
 - Scan, select, password entry, connect, disconnect, forget.
 - Auto-connect at boot with exponential reconnect backoff.
 - On-screen status and error reporting.
+- Access-point mode (see [§13](#13-access-point-mode)).
 
 **Deliberately out of scope for this iteration** — but the API, the NVS
 schema and the state machine are all shaped to accept them without a
 rewrite. See [§12](#12-future-work).
 
 - Station mode with a static address.
-- Access-point mode.
 - Remote keying and the web interface.
 
 ---
 
 ## 3. User interface
 
-Two top-level keys, following the same convention as the existing
+Three top-level keys, following the same convention as the existing
 settings screens (`W` for WPM, `F` for frequency, and so on).
 
 | Key | From | Action |
 |---|---|---|
-| `C` | Decoder | Open the network configuration flow; starts a scan immediately. |
+| `C` | Decoder | Open the network configuration flow (STA); starts a scan immediately. |
+| `A` | Decoder | Open the access-point configuration flow. |
 | `N` | Decoder | Open the network information screen. |
 
 ### 3.1 Scan list
@@ -200,7 +207,12 @@ Namespace **`net`**.
 | `gw` | `uint32` | `0` | Gateway. *Reserved.* |
 | `mask` | `uint32` | `0` | Netmask. *Reserved.* |
 | `dns` | `uint32` | `0` | DNS server. *Reserved.* |
-| `mode` | `uint8` | `0` | `0` = STA, `1` = AP. *Reserved.* |
+| `mode` | `uint8` | `0` | `0` = STA, `1` = AP. |
+| `ap_pass` | `String` (≤63) | `""` | AP passphrase. Empty = open AP. |
+
+The SSID of the access point is the fixed string `A1Keyer` and is not
+persisted. See [§13](#13-access-point-mode) for why the AP passphrase
+lives in its own key separate from the STA passphrases.
 
 Two notes on the shape of this table.
 
@@ -213,12 +225,13 @@ provides no persistence of its own, so the application has to re-register
 the list from its own store on every boot.
 
 **The reserved keys are read and written now** but not exposed in the UI.
-They are the seam for static addressing and AP mode.
+They are the seam for static addressing; the AP passphrase was promoted
+from "future" to "now" once AP mode shipped.
 
 Access goes through free functions (`netConfigLoad`, `netConfigSave`,
-`netConfigClear`, `netConfigCount`) rather than inline `Preferences`
-calls, so the schema can be exercised host-side against an in-memory
-mock.
+`netConfigSaveAp`, `netConfigClearAp`, `netConfigClear`) rather than
+inline `Preferences` calls, so the schema can be exercised host-side
+against an in-memory mock.
 
 ### 5.1 Flash wear
 
@@ -450,9 +463,14 @@ keyboard-less variant exists.
   (`ip_mode`, `ip`, `gw`, `mask`, `dns`) are already reserved; the work
   is a UI for entering four dotted quads and a branch in the connect
   path.
-- **Access-point mode.** The `mode` key is reserved. Needed for
-  configuring the device where no network exists, and a prerequisite for
-  a captive-portal fallback on any headless variant.
+- **Tight DHCP lease range in AP mode.** The current build accepts
+  ESP-IDF's default DHCP lease range (`192.168.73.2..N`). Setting a
+  custom range (e.g. `192.168.73.10..100`) requires lwIP private-API
+  calls (`dhcps_set_option_info`) whose signatures have drifted across
+  ESP-IDF versions; deferred to a follow-up that pins the range on a
+  per-platform basis.
+- **Custom DHCP lease time.** Same as above; ESP-IDF does not expose a
+  stable public API.
 - **Multiple known networks.** The four storage slots exist; what is
   missing is the UI for managing them and best-AP selection at connect
   time.
@@ -463,3 +481,126 @@ keyboard-less variant exists.
 - **Web interface.** The existing `ConsoleServer` is a debug-only
   read-only endpoint gated behind `ENABLE_WIFI_DEBUG`; a real control
   interface is a separate piece of work.
+
+---
+
+## 13. Access-point mode
+
+The Cardputer can also act as a Wi-Fi access point. The use case is
+exactly what a single-station CW keyer needs: an operator stands in
+front of the device with no other infrastructure, the device announces
+itself, and the operator's phone or laptop joins it for direct control.
+A captive portal is intentionally not part of this design — the operator
+already has the keyboard on the device for configuration, and the HTTP
+listener (`HttpServer`) lazy-starts on the AP interface exactly as it
+does in STA mode.
+
+### 13.1 Defaults
+
+| Setting | Value | Source |
+|---|---|---|
+| SSID | `A1Keyer` (literal, not configurable) | `network_manager.h:kApSsid` |
+| Device address | `192.168.73.1/24` | `network_manager.h:kApIpAddr / kApNetmask` |
+| Gateway | `192.168.73.1` | `kApGwAddr` |
+| Max clients | `4` | `kApMaxStations` — Arduino default |
+| Channel | `1` | hard-coded |
+| DHCP lease range | ESP-IDF default (`.2..N` of `/24`) | no override |
+| Hidden | no | `ssid_hidden=0` |
+
+The DHCP lease range is the documented limitation called out in
+[§12](#12-future-work). In practice the user assigns a phone and maybe a
+laptop, both of which accept the first address the server hands them;
+the .2..N range is more than enough.
+
+### 13.2 User interface
+
+| Key | From | Action |
+|---|---|---|
+| `A` | Decoder | Open AP passphrase entry. ENTER starts the AP. ESC returns. |
+| `A` (when AP already up) | Decoder | Skip the password step and jump straight to the info screen. |
+| `N` | Decoder | Open the network information screen. Mode-aware. |
+
+The AP passphrase entry reuses the STA password screen layout — same
+masking, same `FN show` toggle, same `FN , left  FN / right` cursor
+navigation, same `ENTER ok  ESC bk` hint — so the editor does not have
+to be re-learned. The title is "AP pw" instead of "WiFi pw" and the
+SSID line is locked to "A1Keyer (AP)".
+
+#### N-screen (mode-aware)
+
+**STA:** unchanged. See [§3.3](#33-network-information).
+
+**AP:**
+
+```
+AP     up
+SSID:  A1Keyer
+clients: N/4
+hint:  X stop AP   ENT back
+```
+
+The retry-countdown row is omitted in AP mode (no automatic retry). The
+SSID is always "A1Keyer" — it is not a stored credential. `X` calls
+`WifiMgr::disconnectCurrent()` (see below); the AP password is not
+erased.
+
+### 13.3 Mode persistence
+
+The radio's role lives in the existing NVS `mode` key (`0`=STA,
+`1`=AP). Boot behaviour:
+
+- `mode == STA`: existing auto-connect from saved STA credentials
+  ([§8](#8-boot-behaviour-and-auto-connect)).
+- `mode == AP`: nothing automatic. The user must press `A` to bring
+  the AP up, or `C` to switch back to STA mode (the switch calls
+  `disconnectCurrent()` first to free the AP interface). The previous
+  AP passphrase is re-applied automatically, so a reboot does not
+  require retyping it.
+
+Pressing `A` saves `mode=AP` and the typed passphrase before the AP
+is actually brought up — the same "persist on commit" discipline used
+in STA mode ([§6](#6-connection-state-machine)).
+
+### 13.4 The "no-retyping" guarantee
+
+AP and STA credentials are stored in **separate** NVS keys:
+
+- STA: `ssid0` / `pass0` … `ssid3` / `pass3`
+- AP: `ap_pass`
+
+Toggling modes never touches the other set. Concretely:
+
+| User action | NVS touched |
+|---|---|
+| `A` → set AP password → AP comes up | `ap_pass`, `mode=AP` |
+| Later `C` → stop AP, scan + connect STA | (nothing — STA creds still there) |
+| Press `A` again | (nothing — AP passphrase was kept) |
+| `N`-screen `X` in AP mode | (nothing — AP passphrase was kept) |
+| `N`-screen `X` in STA mode | confirms with Y/N, then erases `ssid0` / `pass0` only |
+
+The Y/N confirmation on STA-mode "forget" is the safety net for the one
+destructive gesture in the flow. AP mode's `X` does not need a confirm
+because it does not erase anything.
+
+### 13.5 `disconnectCurrent()` vs `disconnectAndForget()`
+
+Two distinct APIs, both single-purpose:
+
+- `WifiMgr::disconnectCurrent()` — drops whatever link is up
+  (STA or AP) without touching NVS. Use this when the user just wants
+  the radio off (e.g. switching modes).
+- `WifiMgr::disconnectAndForget()` — STA-only legacy. Drops the link
+  AND erases the saved STA credentials. In AP mode it falls back to
+  `disconnectCurrent()`-equivalent behaviour: the AP password and
+  mode flag are intentionally preserved so the user can re-enter AP
+  mode later without retyping.
+
+### 13.6 Why no custom DHCP lease range
+
+ESP-IDF v5.5 / Arduino-ESP32 3.x do not expose a public API for
+constraining the DHCP lease pool. Setting a custom range requires
+calling lwIP's `dhcps_set_option_info()` / `dhcps_set_pool()` under
+`priv_include/`, with signatures that have drifted across
+`pioarduino` releases. The cost of locking ourselves to one signature
+was not justified for a hobby keyer. The .2..N default is documented on
+the N-screen as `clients: N/4`.

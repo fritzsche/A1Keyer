@@ -53,6 +53,8 @@ void netConfigLoad(NetConfig& out) {
     out.dns    = prefs.getUInt("dns", 0);
     out.mode   = (NetMode)prefs.getUChar("mode", (uint8_t)NetMode::STATION);
 
+    prefs.getString("ap_pass", out.apPass, kPassBufLen);
+
     prefs.end();
 }
 
@@ -89,6 +91,11 @@ bool netConfigSave(const NetConfig& cfg) {
     prefs.putUInt ("dns",     cfg.dns);
     prefs.putUChar("mode",    (uint8_t)cfg.mode);
 
+    // AP passphrase is written even when empty so that "user cleared it
+    // explicitly" is durable across reboots. The SSID itself ("A1Keyer")
+    // is the fixed literal and is not persisted.
+    prefs.putString("ap_pass", cfg.apPass);
+
     prefs.end();
     return true;
 }
@@ -106,7 +113,9 @@ bool netConfigSaveSingle(const char* ssid, const char* pass) {
 
     // Preserve the reserved addressing fields so that saving a new
     // network from the scan list does not silently reset a static-IP
-    // configuration once that feature exists.
+    // configuration once that feature exists. Also preserves the AP
+    // passphrase and mode flag so saving a STA credential never
+    // destroys the user's AP password.
     NetConfig cfg;
     netConfigLoad(cfg);
 
@@ -114,6 +123,29 @@ bool netConfigSaveSingle(const char* ssid, const char* pass) {
     netCopyStr(cfg.nets[0].ssid, kSsidBufLen, ssid);
     netCopyStr(cfg.nets[0].pass, kPassBufLen, pass);
     for (uint8_t i = 1; i < kMaxNetworks; ++i) cfg.nets[i] = NetCredential{};
+
+    return netConfigSave(cfg);
+}
+
+bool netConfigSaveAp(const char* pass) {
+    // Preserve everything (STA creds, reserved addressing, mode) so
+    // that re-entering an AP passphrase is a one-field change.
+    NetConfig cfg;
+    netConfigLoad(cfg);
+
+    netCopyStr(cfg.apPass, kPassBufLen, pass);
+    cfg.mode = NetMode::ACCESS_POINT;
+
+    return netConfigSave(cfg);
+}
+
+bool netConfigClearAp() {
+    NetConfig cfg;
+    netConfigLoad(cfg);
+
+    cfg.apPass[0] = '\0';
+    // Mode is intentionally left as the user had it. "Clear AP password"
+    // is about opening the next AP, not about leaving AP mode.
 
     return netConfigSave(cfg);
 }

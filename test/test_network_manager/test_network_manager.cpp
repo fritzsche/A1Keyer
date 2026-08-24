@@ -21,9 +21,13 @@ int  beginStaCalls   = 0;
 int  disconnectCalls = 0;
 int  scanDeleteCalls = 0;
 int  initStaCalls    = 0;
+int  initApCalls     = 0;
+int  startApCalls    = 0;
+int  stopApCalls     = 0;
 
 bool startScanSucceeds = true;
 bool beginStaSucceeds  = true;
+bool startApSucceeds   = true;
 
 /// Result count reported by scanComplete(); negative means "still running".
 int scanResult = -1;
@@ -33,14 +37,33 @@ std::vector<NetScanEntry> scanTable;
 /// Every (ssid, pass) the manager tried to associate with, in order.
 std::vector<std::pair<std::string, std::string>> attempts;
 
+/// Most recent AP bring-up args.
+std::string lastApSsid;
+std::string lastApPass;
+
+/// Configured AP IP/gw/mask at last initAp() call (host byte order).
+uint32_t apIp   = 0;
+uint32_t apGw   = 0;
+uint32_t apMask = 0;
+
+/// Driver's reported station count — tests drive this by calling
+/// `finishApJoin()` / `finishApLeave()` to simulate events, or by
+/// setting it directly to verify the boot-time poll() path.
+uint8_t driverStationCount = 0;
+
 void reset() {
     clockMs = 1000;
     startScanCalls = beginStaCalls = disconnectCalls = 0;
     scanDeleteCalls = initStaCalls = 0;
-    startScanSucceeds = beginStaSucceeds = true;
+    initApCalls = startApCalls = stopApCalls = 0;
+    startScanSucceeds = beginStaSucceeds = startApSucceeds = true;
     scanResult = -1;
     scanTable.clear();
     attempts.clear();
+    lastApSsid.clear();
+    lastApPass.clear();
+    apIp = apGw = apMask = 0;
+    driverStationCount = 0;
 }
 
 uint32_t millisFn() { return clockMs; }
@@ -71,6 +94,22 @@ bool beginSta(const char* ssid, const char* pass) {
 
 void disconnect() { ++disconnectCalls; }
 
+void initAp(uint32_t ip, uint32_t gw, uint32_t mask) {
+    ++initApCalls;
+    apIp = ip; apGw = gw; apMask = mask;
+}
+
+bool startAp(const char* ssid, const char* pass) {
+    ++startApCalls;
+    lastApSsid = ssid ? ssid : "";
+    lastApPass = pass ? pass : "";
+    return startApSucceeds;
+}
+
+void stopAp() { ++stopApCalls; driverStationCount = 0; }
+
+uint8_t apStations() { return driverStationCount; }
+
 NetHal hal() {
     NetHal h;
     h.millisFn     = millisFn;
@@ -81,6 +120,10 @@ NetHal hal() {
     h.scanDelete   = scanDelete;
     h.beginSta     = beginSta;
     h.disconnect   = disconnect;
+    h.initAp       = initAp;
+    h.startAp      = startAp;
+    h.stopAp       = stopAp;
+    h.apStations   = apStations;
     return h;
 }
 
@@ -90,6 +133,24 @@ void finishScanWith(std::vector<NetScanEntry> entries) {
     scanTable  = std::move(entries);
     scanResult = (int)scanTable.size();
     WifiMgr::notifyScanDone();
+}
+
+/// AP-mode event helpers. The test driver pretends to be the
+/// Wi-Fi task: it stamps a station into the driver count and then
+/// fires the matching event sink so poll() drains it.
+void apStart() {
+    WifiMgr::notifyApStart();
+}
+void apStop() {
+    WifiMgr::notifyApStop();
+}
+void apJoin() {
+    if (driverStationCount < 4) driverStationCount++;
+    WifiMgr::notifyApStationJoined();
+}
+void apLeave() {
+    if (driverStationCount > 0) driverStationCount--;
+    WifiMgr::notifyApStationLeft();
 }
 
 NetScanEntry ap(const char* ssid, int8_t rssi, bool open = false,
@@ -678,6 +739,225 @@ static void test_state_changed_at_tracks_transitions() {
     CHECK_EQ(7000u, WifiMgr::stateChangedAt());
 }
 
+// ─── AP-mode tests ─────────────────────────────────────────────────────────
+
+static void test_ap_init_applies_locked_addressing() {
+    setup();
+    netConfigSaveAp("ap-pw");
+    WifiMgr::begin();
+    CHECK_EQ(1, fake::initApCalls);
+    CHECK_EQ(WifiMgr::kApIpAddr,  fake::apIp);
+    CHECK_EQ(WifiMgr::kApGwAddr,  fake::apGw);
+    CHECK_EQ(WifiMgr::kApNetmask, fake::apMask);
+    CHECK(WifiMgr::mode() == NetMode::ACCESS_POINT);
+    CHECK(WifiMgr::state() == NetState::IDLE);
+}
+
+static void test_ap_start_uses_fixed_ssid_and_persists_password() {
+    setup();
+    WifiMgr::startAp("hunter2");
+    CHECK_EQ(1, fake::startApCalls);
+    CHECK_STR_EQ(WifiMgr::kApSsid, fake::lastApSsid.c_str());
+    CHECK_STR_EQ("hunter2",        fake::lastApPass.c_str());
+
+    NetConfig cfg;
+    netConfigLoad(cfg);
+    CHECK_STR_EQ("hunter2", cfg.apPass);
+    CHECK(cfg.mode == NetMode::ACCESS_POINT);
+}
+
+static void test_ap_event_drives_state_to_up() {
+    // The state transitions IDLE → AP_UP directly on a successful
+    // softAP() call. The ARDUINO_EVENT_WIFI_AP_START event is no
+    // longer used to gate the state — its dispatch chain is
+    // unreliable after the WiFi.mode(WIFI_OFF) cycle the device HAL
+    // performs, and softAP() returning true is itself proof that the
+    // AP is broadcasting.
+    setup();
+    WifiMgr::startAp("pw");
+    CHECK(WifiMgr::state() == NetState::AP_UP);
+    CHECK(WifiMgr::isConnected());
+    CHECK_STR_EQ(WifiMgr::kApSsid, WifiMgr::apSsid());
+
+    // Station events still flow through the AP_UP branch.
+    fake::apJoin();
+    WifiMgr::poll();
+    CHECK_EQ(1, (int)WifiMgr::apStations());
+}
+
+static void test_ap_failure_times_out() {
+    // startAp() failure surfaces synchronously — there is no
+    // intermediate AP_STARTING state to time out from. A failed HAL
+    // call goes straight to AP_FAILED.
+    setup();
+    fake::startApSucceeds = false;
+    WifiMgr::startAp("pw");
+    CHECK(WifiMgr::state() == NetState::AP_FAILED);
+    CHECK_STR_EQ("could not start AP", WifiMgr::lastErrorMessage());
+}
+
+static void test_ap_station_join_and_leave_update_count() {
+    setup();
+    WifiMgr::startAp("pw");
+    fake::apStart();
+    WifiMgr::poll();
+    CHECK_EQ(0, (int)WifiMgr::apStations());
+
+    fake::apJoin(); WifiMgr::poll();
+    CHECK_EQ(1, (int)WifiMgr::apStations());
+
+    fake::apJoin(); WifiMgr::poll();
+    CHECK_EQ(2, (int)WifiMgr::apStations());
+
+    fake::apLeave(); WifiMgr::poll();
+    CHECK_EQ(1, (int)WifiMgr::apStations());
+}
+
+static void test_ap_stop_returns_to_idle() {
+    setup();
+    WifiMgr::startAp("pw");
+    fake::apStart(); WifiMgr::poll();
+    fake::apJoin(); WifiMgr::poll();
+    CHECK_EQ(1, (int)WifiMgr::apStations());
+
+    WifiMgr::stopAp();
+    CHECK(WifiMgr::state() == NetState::IDLE);
+    CHECK_EQ(0, (int)WifiMgr::apStations());
+    CHECK_EQ(1, fake::stopApCalls);
+
+    NetConfig cfg;
+    netConfigLoad(cfg);
+    CHECK_STR_EQ("pw", cfg.apPass);
+}
+
+static void test_ap_is_idempotent_while_running() {
+    setup();
+    WifiMgr::startAp("first");
+    CHECK_EQ(1, fake::startApCalls);
+    WifiMgr::startAp("second");
+    CHECK_EQ(1, fake::startApCalls);
+    CHECK_STR_EQ("first", fake::lastApPass.c_str());
+}
+
+static void test_ap_start_failure_surfaces_error() {
+    setup();
+    fake::startApSucceeds = false;
+    WifiMgr::startAp("pw");
+    CHECK(WifiMgr::state() == NetState::AP_FAILED);
+    CHECK_STR_EQ("could not start AP", WifiMgr::lastErrorMessage());
+}
+
+static void test_disconnect_current_drops_ap_without_nvs_change() {
+    setup();
+    WifiMgr::startAp("kept");
+    fake::apStart(); WifiMgr::poll();
+    fake::apJoin(); WifiMgr::poll();
+    CHECK(WifiMgr::state() == NetState::AP_UP);
+
+    WifiMgr::disconnectCurrent();
+    CHECK(WifiMgr::state() == NetState::IDLE);
+    CHECK_EQ(0, (int)WifiMgr::apStations());
+    CHECK_EQ(1, fake::stopApCalls);
+
+    NetConfig cfg;
+    netConfigLoad(cfg);
+    CHECK_STR_EQ("kept", cfg.apPass);
+    CHECK(cfg.mode == NetMode::ACCESS_POINT);
+}
+
+static void test_disconnect_current_drops_sta_without_nvs_change() {
+    setup();
+    netConfigSaveSingle("Home", "homepw");
+    WifiMgr::begin();
+    WifiMgr::connectWithSaved();
+    WifiMgr::notifyGotIp(0xC0A80164);
+    WifiMgr::poll();
+    CHECK(WifiMgr::state() == NetState::CONNECTED);
+
+    WifiMgr::disconnectCurrent();
+    CHECK(WifiMgr::state() == NetState::IDLE);
+    CHECK_EQ(1, fake::disconnectCalls);
+
+    NetConfig cfg;
+    netConfigLoad(cfg);
+    CHECK_STR_EQ("Home", cfg.nets[0].ssid);
+    CHECK_STR_EQ("homepw", cfg.nets[0].pass);
+}
+
+static void test_disconnect_current_in_idle_is_noop() {
+    setup();
+    WifiMgr::disconnectCurrent();
+    CHECK(WifiMgr::state() == NetState::IDLE);
+    CHECK_EQ(0, fake::disconnectCalls);
+    CHECK_EQ(0, fake::stopApCalls);
+}
+
+static void test_disconnect_and_forget_in_ap_drops_link_keeps_nvs() {
+    setup();
+    WifiMgr::startAp("kept");
+    fake::apStart(); WifiMgr::poll();
+    CHECK(WifiMgr::state() == NetState::AP_UP);
+
+    WifiMgr::disconnectAndForget();
+    CHECK(WifiMgr::state() == NetState::IDLE);
+    CHECK_EQ(1, fake::stopApCalls);
+
+    NetConfig cfg;
+    netConfigLoad(cfg);
+    CHECK_STR_EQ("kept", cfg.apPass);
+    CHECK(cfg.mode == NetMode::ACCESS_POINT);
+}
+
+static void test_ap_mode_saved_in_nvs_round_trips() {
+    setup();
+    WifiMgr::startAp("pw");
+    fake::apStart(); WifiMgr::poll();
+
+    // Simulate a reboot by rebuilding from scratch.
+    WifiMgr::resetForTest();
+    WifiMgr::setHalForTest(fake::hal());
+    WifiMgr::begin();
+
+    CHECK(WifiMgr::mode() == NetMode::ACCESS_POINT);
+}
+
+static void test_sta_credentials_preserved_after_ap_save() {
+    setup();
+    netConfigSaveSingle("Home", "homepw");
+    WifiMgr::startAp("ap-pw");
+
+    NetConfig cfg;
+    netConfigLoad(cfg);
+    CHECK_STR_EQ("Home", cfg.nets[0].ssid);
+    CHECK_STR_EQ("homepw", cfg.nets[0].pass);
+    CHECK_STR_EQ("ap-pw", cfg.apPass);
+}
+
+static void test_ap_boot_does_not_associate_in_sta() {
+    setup();
+    netConfigSaveSingle("Home", "homepw");
+    WifiMgr::begin();
+    // Default mode is still STA — verify the auto-connect path runs
+    // as before. AP-mode boot is covered by the next test.
+    CHECK(WifiMgr::mode() == NetMode::STATION);
+    WifiMgr::connectWithSaved();
+    CHECK_EQ(1, fake::beginStaCalls);
+}
+
+static void test_ap_ssid_constant_is_locked() {
+    CHECK_STR_EQ("A1Keyer", WifiMgr::kApSsid);
+    setup();
+    WifiMgr::startAp("pw");
+    CHECK_STR_EQ("A1Keyer", fake::lastApSsid.c_str());
+}
+
+static void test_is_connected_true_in_ap_up() {
+    setup();
+    WifiMgr::startAp("pw");
+    fake::apStart(); WifiMgr::poll();
+    CHECK(WifiMgr::isConnected());
+}
+
 int main() {
     RUN(test_starts_idle);
     RUN(test_begin_without_credentials_stays_idle);
@@ -727,5 +1007,27 @@ int main() {
     RUN(test_stray_events_in_idle_are_ignored);
     RUN(test_disconnect_event_while_connecting_after_got_ip);
     RUN(test_state_changed_at_tracks_transitions);
+
+    // ─── AP-mode tests ───────────────────────────────────────────────────
+
+    // (definitions below)
+
+    RUN(test_ap_init_applies_locked_addressing);
+    RUN(test_ap_start_uses_fixed_ssid_and_persists_password);
+    RUN(test_ap_event_drives_state_to_up);
+    RUN(test_ap_failure_times_out);
+    RUN(test_ap_station_join_and_leave_update_count);
+    RUN(test_ap_stop_returns_to_idle);
+    RUN(test_ap_is_idempotent_while_running);
+    RUN(test_ap_start_failure_surfaces_error);
+    RUN(test_disconnect_current_drops_ap_without_nvs_change);
+    RUN(test_disconnect_current_drops_sta_without_nvs_change);
+    RUN(test_disconnect_current_in_idle_is_noop);
+    RUN(test_disconnect_and_forget_in_ap_drops_link_keeps_nvs);
+    RUN(test_ap_mode_saved_in_nvs_round_trips);
+    RUN(test_sta_credentials_preserved_after_ap_save);
+    RUN(test_ap_boot_does_not_associate_in_sta);
+    RUN(test_ap_ssid_constant_is_locked);
+    RUN(test_is_connected_true_in_ap_up);
     return test_summary();
 }

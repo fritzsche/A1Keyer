@@ -59,8 +59,24 @@ public:
     /** Show the Wi-Fi passphrase entry screen. */
     virtual void showWifiPasswordInput(MorseModel& model) = 0;
 
+    /**
+     * Show the AP passphrase entry screen. Same TextInput-backed UI as
+     * the STA password screen, but the title and SSID line are locked
+     * to "A1Keyer (AP)" and there is no scan-cursor.
+     */
+    virtual void showWifiApPasswordInput(MorseModel& model) = 0;
+
     /** Show the Wi-Fi status / IP / error screen. */
     virtual void showWifiNetworkInfo(MorseModel& model) = 0;
+
+    /**
+     * Draw the "Forget network?" Y/N overlay on top of the Wi-Fi
+     * status screen. main.cpp drives the modal state through
+     * MorseModel::wifiNetConfirmForget(); this method is a pure
+     * renderer and assumes the underlying screen has already been
+     * drawn this frame.
+     */
+    virtual void showNetConfirmForget(MorseModel& model) = 0;
 
     /**
      * Show the memory-keyer slot picker.

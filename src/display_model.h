@@ -43,6 +43,8 @@ enum class DisplayScreen {
     WIFI_SCAN_LIST,   ///< Network config: scan list / "Scanning…" / scan failed message.
     WIFI_PASSWORD_INPUT, ///< Network config: passphrase entry (TextInput-backed).
     WIFI_NETWORK_INFO,   ///< Network config: status, SSID, IP / error, X to forget, R to retry.
+    WIFI_AP_PASSWORD_INPUT, ///< Network config: AP passphrase entry (TextInput-backed, SSID = "A1Keyer").
+    WIFI_NETWORK_INFO_CONFIRM, ///< Network config: Y/N confirmation overlay for "forget network".
 
     MEMORY_PICK,         ///< Memory keyer: M opened, awaiting digit 0-9 to choose the slot to edit.
     MEMORY_EDIT          ///< Memory keyer: slot picked, editing CW text via TextInput (same control as the Wi-Fi password screen).
@@ -562,6 +564,28 @@ public:
     int wifiCredSource() const;
     void setWifiCredSource(int s);
 
+    /// Current radio role (NetMode int value). 0=STA, 1=AP.
+    int wifiMode() const;
+    void setWifiMode(int m);
+
+    /// Number of stations currently associated with our AP. Only
+    /// meaningful when mode()==ACCESS_POINT.
+    int wifiApStations() const;
+    void setWifiApStations(int n);
+
+    /// Maximum simultaneous AP clients (kApMaxStations, mirrored for
+    /// the renderer).
+    int wifiApMaxStations() const;
+    void setWifiApMaxStations(int n);
+
+    /// Whether the Y/N "Forget?" overlay is currently drawn on top of
+    /// the network-info screen. main.cpp drives this from the X-key
+    /// handler in STA mode; the renderer reads it to draw the
+    /// overlay; the X-key handler reads it to decide whether Y/N
+    /// dismiss it or to enter it.
+    bool wifiNetConfirmForget() const;
+    void setWifiNetConfirmForget(bool v);
+
     /// Seconds until the next automatic retry (0 when none is pending).
     uint32_t wifiSecondsUntilRetry() const;
     void setWifiSecondsUntilRetry(uint32_t s);
@@ -721,6 +745,10 @@ private:
     std::atomic<uint32_t> _wifiLocalIP{0};
     std::atomic<bool>    _wifiHasCredentials{false};
     std::atomic<int>     _wifiCredSource{0};
+    std::atomic<int>     _wifiMode{0};
+    std::atomic<int>     _wifiApStations{0};
+    std::atomic<int>     _wifiApMaxStations{4};
+    std::atomic<bool>    _wifiNetConfirmForget{false};
     std::atomic<uint32_t> _wifiSecondsUntilRetry{0};
     std::atomic<int>     _wifiScanCursor{0};
     std::atomic<int>     _wifiScanTop{0};

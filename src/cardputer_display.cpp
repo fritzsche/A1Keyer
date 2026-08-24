@@ -89,9 +89,22 @@ void CardputerDisplay::render() {
             updateStatusLine(model);
             showWifiPasswordInput(model);
             break;
+        case DisplayScreen::WIFI_AP_PASSWORD_INPUT:
+            updateStatusLine(model);
+            showWifiApPasswordInput(model);
+            break;
         case DisplayScreen::WIFI_NETWORK_INFO:
             updateStatusLine(model);
             showWifiNetworkInfo(model);
+            // The Y/N overlay is drawn on top of the N-screen, NOT a
+            // separate screen — the underlying info is still useful
+            // while the prompt is up.
+            if (model.wifiNetConfirmForget()) showNetConfirmForget(model);
+            break;
+        case DisplayScreen::WIFI_NETWORK_INFO_CONFIRM:
+            updateStatusLine(model);
+            showWifiNetworkInfo(model);
+            showNetConfirmForget(model);
             break;
         case DisplayScreen::MEMORY_PICK:
             updateStatusLine(model);
@@ -388,8 +401,8 @@ void CardputerDisplay::showPolaritySettingsView(MorseModel& model) {
 namespace {
 
 /// Convert the model-side int mirror of NetState to the enum.
-NetState mirrorState(int v) {
-    if (v < 0 || v > (int)NetState::DISCONNECTED) return NetState::IDLE;
+ NetState mirrorState(int v) {
+    if (v < 0 || v > (int)NetState::AP_FAILED) return NetState::IDLE;
     return static_cast<NetState>((uint8_t)v);
 }
 
@@ -403,6 +416,9 @@ const char* stateLabel(NetState s) {
         case NetState::CONNECTED:       return "connected";
         case NetState::CONNECT_FAILED:  return "connect failed";
         case NetState::DISCONNECTED:    return "disconnected";
+        case NetState::AP_STARTING:     return "starting";
+        case NetState::AP_UP:           return "up";
+        case NetState::AP_FAILED:       return "ap failed";
     }
     return "?";
 }
@@ -641,18 +657,79 @@ void CardputerDisplay::showWifiPasswordInput(MorseModel& model) {
     M5.Display.print("FN show             ESC bk");
 }
 
-void CardputerDisplay::showWifiNetworkInfo(MorseModel& model) {
-    const NetState st = mirrorState(model.wifiState());
+void CardputerDisplay::showWifiApPasswordInput(MorseModel& model) {
+    TextInput* ti = model.passwordInput();
 
-    // Five size-2 lines fit between the status bar (y=20) and the
-    // bottom edge (y=135): title, state, SSID, IP/error, hint. The
-    // retry countdown gets the gap above the hint, sized down where
-    // space is tight.
+    // Same layout as the STA password screen — a deliberate choice so
+    // the operator doesn't have to re-learn a new editor — but with
+    // the title and SSID line locked to AP identity. There is no scan
+    // cursor to read; the SSID is the literal "A1Keyer".
     M5.Display.setFont(nullptr);
     M5.Display.setTextSize(2);
     M5.Display.setTextColor(COLOR_FG);
     M5.Display.setCursor(0, MAIN_Y + 0);
-    M5.Display.print("WiFi");
+    M5.Display.print("AP pw");
+
+    M5.Display.setTextColor(COLOR_ACCENT);
+    M5.Display.setCursor(0, MAIN_Y + 18);
+    M5.Display.print(WifiMgr::apSsid());
+    M5.Display.setTextColor(0x7384);
+    M5.Display.print(" (AP)");
+
+    if (M5Cardputer.Keyboard.capslocked()) {
+        M5.Display.setTextColor(COLOR_WARN);
+        M5.Display.setCursor(SCREEN_W - 56, MAIN_Y + 4);
+        M5.Display.setTextSize(1);
+        M5.Display.print("CAPS");
+    }
+
+    constexpr int kBoxX = 4;
+    constexpr int kBoxY = MAIN_Y + 38;
+    constexpr int kBoxW = SCREEN_W - 8;
+    constexpr int kBoxH = 32;
+    M5.Display.drawRect(kBoxX, kBoxY, kBoxW, kBoxH, COLOR_FG);
+
+    M5.Display.setTextSize(2);
+    M5.Display.setTextColor(COLOR_FG);
+    M5.Display.setCursor(kBoxX + 6, kBoxY + 8);
+    const char* txt = ti->value();
+    const size_t len = ti->length();
+    const size_t cur = ti->cursorPos();
+    const bool revealed = ti->reveal();
+    const char mask = ti->maskChar();
+    for (size_t i = 0; i < len; ++i) {
+        M5.Display.print(revealed ? txt[i] : mask);
+    }
+
+    const int charW = M5.Display.textWidth("M");
+    const int cx = kBoxX + 6 + (int)cur * charW;
+    if (cx + 2 <= kBoxX + kBoxW - 4) {
+        M5.Display.fillRect(cx, kBoxY + 6, 2, kBoxH - 12, COLOR_FG);
+    }
+
+    M5.Display.setFont(nullptr);
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(0x7384);
+    M5.Display.setCursor(0, MAIN_Y + 78);
+    M5.Display.print("ENTER ok   FN , left  FN / right");
+    M5.Display.setCursor(0, MAIN_Y + 94);
+    M5.Display.print("FN show             ESC bk");
+}
+
+void CardputerDisplay::showWifiNetworkInfo(MorseModel& model) {
+    const NetState st = mirrorState(model.wifiState());
+    const bool    apMode = model.wifiMode() == (int)NetMode::ACCESS_POINT;
+
+    // Five size-2 lines fit between the status bar (y=20) and the
+    // bottom edge (y=135): title, state, SSID, IP/error/clients, hint.
+    // STA and AP share the first three rows and diverge on the last
+    // two — STA shows error + retry countdown; AP shows the
+    // connected-station count.
+    M5.Display.setFont(nullptr);
+    M5.Display.setTextSize(2);
+    M5.Display.setTextColor(COLOR_FG);
+    M5.Display.setCursor(0, MAIN_Y + 0);
+    M5.Display.print(apMode ? "AP" : "WiFi");
     M5.Display.setTextColor(COLOR_ACCENT);
     M5.Display.setCursor(56, MAIN_Y + 0);
     M5.Display.print(stateLabel(st));
@@ -662,12 +739,38 @@ void CardputerDisplay::showWifiNetworkInfo(MorseModel& model) {
     M5.Display.setCursor(0, MAIN_Y + 22);
     M5.Display.print("SSID:");
     M5.Display.setCursor(68, MAIN_Y + 22);
-    const char* ssid = WifiMgr::connectedSSID();
-    M5.Display.print(ssid[0] ? ssid : "(none)");
+    if (apMode) {
+        // Locked AP identity.
+        M5.Display.print(WifiMgr::apSsid());
+    } else {
+        const char* ssid = WifiMgr::connectedSSID();
+        M5.Display.print(ssid[0] ? ssid : "(none)");
+    }
 
-    // IP, or the latest error
+    // Row 3:
+    //   AP_UP          → "clients: N/4"
+    //   AP_STARTING    → "starting…"
+    //   AP_FAILED      → the error in warn color (otherwise the user
+    //                    has no idea why their passphrase didn't work)
+    //   STA connected  → IP
+    //   STA otherwise  → the error in warn color
     M5.Display.setCursor(0, MAIN_Y + 44);
-    if (WifiMgr::isConnected()) {
+    if (apMode) {
+        if (st == NetState::AP_UP) {
+            const int n = model.wifiApStations();
+            const int m = model.wifiApMaxStations();
+            M5.Display.printf("clients: %d/%d", n, m);
+        } else if (st == NetState::AP_FAILED) {
+            M5.Display.setTextColor(COLOR_WARN);
+            const char* msg = WifiMgr::lastErrorMessage();
+            M5.Display.print(msg[0] ? msg : "(ap failed)");
+            M5.Display.setTextColor(COLOR_FG);
+        } else {
+            // AP_STARTING, or any transitional state that landed us
+            // on this screen before the AP came up.
+            M5.Display.print("starting...");
+        }
+    } else if (WifiMgr::isConnected()) {
         const uint32_t ip = model.wifiLocalIP();
         const uint8_t a = (uint8_t)(ip >> 24);
         const uint8_t b = (uint8_t)(ip >> 16);
@@ -681,22 +784,59 @@ void CardputerDisplay::showWifiNetworkInfo(MorseModel& model) {
     }
     M5.Display.setTextColor(COLOR_FG);
 
-    // Retry countdown and credential-source marker share the same
-    // line just above the hint. At size 1 they fit alongside the
-    // hint without crowding the main info above.
+    // Retry countdown (STA only — AP has no retry).
     M5.Display.setTextSize(1);
-    if (!WifiMgr::isConnected() && model.wifiSecondsUntilRetry() > 0) {
+    if (!apMode && !WifiMgr::isConnected() && model.wifiSecondsUntilRetry() > 0) {
         M5.Display.setTextColor(0x7384);
         M5.Display.setCursor(0, MAIN_Y + 66);
         M5.Display.printf("retry in %us", (unsigned)model.wifiSecondsUntilRetry());
     }
 
-    // Hint row
+    // Hint row. STA: forget/retry/back. AP: drop-AP (preserves NVS)
+    // and back. The Y/N confirm overlay (STA only) is drawn by
+    // showNetConfirmForget() on top of this screen.
     M5.Display.setFont(nullptr);
     M5.Display.setTextSize(2);
     M5.Display.setTextColor(0x7384);
     M5.Display.setCursor(0, MAIN_Y + 98);
-    M5.Display.print("X: forget  R: retry  ENT: back");
+    if (apMode) {
+        M5.Display.print("X: stop AP    ENT: back");
+    } else {
+        M5.Display.print("X: forget  R: retry  ENT: back");
+    }
+}
+
+void CardputerDisplay::showNetConfirmForget(MorseModel& model) {
+    // Modal overlay on top of showWifiNetworkInfo. Drawn as a centred
+    // panel with the prompt in white and the Y/N hint underneath.
+    // We paint on top of the existing screen so the user still sees
+    // the SSID / IP behind a half-transparent box.
+    //
+    // Box layout (size 2 font, 12 px glyph): 240 px wide, ~70 px tall.
+    // Vertically centred in MAIN_Y..135.
+    constexpr int kW = 220;
+    constexpr int kH = 64;
+    constexpr int kX = (240 - kW) / 2;
+    constexpr int kY = MAIN_Y + (135 - MAIN_Y - kH) / 2;
+
+    // Dim the underlying info slightly.
+    M5.Display.fillRect(kX, kY, kW, kH, 0x0000);
+    M5.Display.drawRect(kX, kY, kW, kH, COLOR_ACCENT);
+
+    M5.Display.setFont(nullptr);
+    M5.Display.setTextSize(2);
+    M5.Display.setTextColor(COLOR_FG);
+    M5.Display.setCursor(kX + 10, kY + 8);
+    M5.Display.print("Forget STA?");
+
+    M5.Display.setTextColor(COLOR_ACCENT);
+    M5.Display.setCursor(kX + 10, kY + 28);
+    M5.Display.print("Y: erase  N: keep");
+
+    // (void)model — the renderer is purely presentational. The
+    // boolean driving this overlay is in `model.wifiNetConfirmForget()`
+    // and the dispatcher in render() already gated the call on that.
+    (void)model;
 }
 
 // ─── Memory keyer screens ───────────────────────────────────────────────────

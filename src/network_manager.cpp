@@ -72,10 +72,12 @@ constexpr uint32_t kScanTimeoutMs    = 10000;
 constexpr uint32_t kConnectTimeoutMs = 15000;
 constexpr uint32_t kBackoffStartMs   = 1000;
 constexpr uint32_t kBackoffMaxMs     = 300000;   // five minutes
+constexpr uint32_t kApStartTimeoutMs = 10000;
 
 NetHal   s_hal{};
 NetState s_state       = NetState::IDLE;
 uint32_t s_stateAt     = 0;
+NetMode  s_mode        = NetMode::STATION;
 
 // Flags set by the Wi-Fi task, consumed by poll() on the loop core.
 std::atomic<bool>     s_evScanDone{false};
@@ -83,6 +85,12 @@ std::atomic<bool>     s_evGotIp{false};
 std::atomic<uint32_t> s_evIp{0};
 std::atomic<bool>     s_evDisconnected{false};
 std::atomic<uint8_t>  s_evReason{0};
+
+// AP-mode event flags. Atomic because they arrive on the Wi-Fi task.
+std::atomic<bool>     s_evApStart{false};
+std::atomic<bool>     s_evApStop{false};
+std::atomic<bool>     s_evApJoined{false};
+std::atomic<bool>     s_evApLeft{false};
 
 NetScanEntry s_scan[WifiMgr::kMaxScanResults];
 int          s_scanCount = 0;
@@ -100,6 +108,11 @@ char     s_connectedSsid[kSsidBufLen] = {0};
 uint32_t s_ip           = 0;
 uint32_t s_backoffMs    = kBackoffStartMs;
 uint32_t s_retryAt      = 0;      ///< 0 = no retry scheduled
+
+// AP-mode mirror state. The driver is the source of truth at boot
+// (poll() queries `apStations()` once), but the joined/left events
+// keep it in sync without polling thereafter.
+uint8_t s_apClients = 0;
 
 uint32_t now() {
     return s_hal.millisFn ? s_hal.millisFn() : 0;
@@ -119,6 +132,13 @@ void clearEvents() {
     s_evScanDone.store(false);
     s_evGotIp.store(false);
     s_evDisconnected.store(false);
+}
+
+void clearApEvents() {
+    s_evApStart.store(false);
+    s_evApStop.store(false);
+    s_evApJoined.store(false);
+    s_evApLeft.store(false);
 }
 
 /// Schedule the next automatic attempt and grow the backoff.
@@ -169,10 +189,30 @@ void harvestScanResults(int n) {
 namespace WifiMgr {
 
 void begin() {
-    if (s_hal.initSta) s_hal.initSta();
-
     NetConfig cfg;
     netConfigLoad(cfg);
+    s_mode = cfg.mode;
+
+    if (s_mode == NetMode::ACCESS_POINT) {
+        // AP path: configure the soft-AP interface with the locked
+        // 192.168.73.0/24 block and load the stored passphrase. We do
+        // NOT call esp_wifi_set_storage(WIFI_STORAGE_RAM) here — that
+        // flag is meaningful only in STA mode and would interact
+        // oddly with AP state.
+        if (s_hal.initAp) {
+            s_hal.initAp(WifiMgr::kApIpAddr, WifiMgr::kApGwAddr, WifiMgr::kApNetmask);
+        }
+        netCopyStr(s_pass, sizeof(s_pass), cfg.apPass);
+        s_ssid[0]       = '\0';   // unused in AP mode
+        s_source        = NetCredSource::NVS;
+        setState(NetState::IDLE);
+        return;
+    }
+
+    // STA path: existing behaviour. initSta installs the
+    // WIFI_STORAGE_RAM guard that makes "forget network" actually
+    // forget (see docs/network.md §4.2).
+    if (s_hal.initSta) s_hal.initSta();
 
     if (cfg.hasCredentials()) {
         netCopyStr(s_ssid, sizeof(s_ssid), cfg.nets[0].ssid);
@@ -260,6 +300,19 @@ void connectWithSaved() {
 }
 
 void disconnectAndForget() {
+    if (s_mode == NetMode::ACCESS_POINT) {
+        // Forgetting means dropping the link in AP mode. STA creds
+        // are untouched (they were never present on this path), and
+        // AP mode + AP password are preserved by design — see the
+        // discardAndStopAp variant below.
+        if (s_hal.stopAp) s_hal.stopAp();
+        s_apClients = 0;
+        clearApEvents();
+        setError("");
+        setState(NetState::IDLE);
+        return;
+    }
+
     if (s_hal.disconnect) s_hal.disconnect();
     netConfigClear();
 
@@ -277,11 +330,110 @@ void disconnectAndForget() {
     setState(NetState::IDLE);
 }
 
+void disconnectCurrent() {
+    // Drops whatever link is up. NVS is NEVER touched here — that is
+    // the whole point of this entry point vs. disconnectAndForget().
+    switch (s_state) {
+    case NetState::CONNECTING:
+    case NetState::CONNECTED:
+    case NetState::CONNECT_FAILED:
+    case NetState::DISCONNECTED:
+        if (s_hal.disconnect) s_hal.disconnect();
+        s_ip = 0;
+        s_connectedSsid[0] = '\0';
+        cancelRetry();
+        clearEvents();
+        setError("");
+        setState(NetState::IDLE);
+        break;
+    case NetState::AP_STARTING:
+    case NetState::AP_UP:
+        if (s_hal.stopAp) s_hal.stopAp();
+        s_apClients = 0;
+        clearApEvents();
+        setError("");
+        setState(NetState::IDLE);
+        break;
+    case NetState::SCANNING:
+        if (s_hal.disconnect) s_hal.disconnect();
+        if (s_hal.scanDelete) s_hal.scanDelete();
+        clearEvents();
+        setError("");
+        setState(NetState::IDLE);
+        break;
+    case NetState::SCAN_DONE:
+    case NetState::SCAN_FAILED:
+    case NetState::AP_FAILED:
+    case NetState::IDLE:
+        // Nothing to drop.
+        setError("");
+        setState(NetState::IDLE);
+        break;
+    }
+}
+
 void retry() {
     if (s_ssid[0] == '\0') return;
     s_backoffMs = kBackoffStartMs;
     cancelRetry();
     beginAssociation();
+}
+
+void startAp(const char* pass) {
+    // Idempotent — silently no-op when an AP is already up.
+    if (s_state == NetState::AP_UP || s_state == NetState::AP_STARTING) {
+        return;
+    }
+
+    // Persist BEFORE bringing the interface up. Same rationale as the
+    // STA-mode connect(): a power-cycle between the user committing
+    // the password and the AP actually starting would otherwise wipe
+    // the just-typed passphrase.
+    netCopyStr(s_pass, sizeof(s_pass), pass);
+    if (!netConfigSaveAp(s_pass)) {
+        Log::warning("[NET] startAp: save NVS failed; passphrase will "
+                     "not survive a power cycle");
+    }
+
+    clearApEvents();
+    s_apClients = 0;
+
+    if (!s_hal.startAp || !s_hal.startAp(kApSsid, s_pass)) {
+        setError("could not start AP");
+        setState(NetState::AP_FAILED);
+        return;
+    }
+
+    s_mode  = NetMode::ACCESS_POINT;
+    s_source = NetCredSource::NVS;
+
+    // Trust the softAP return value. By the time it returns true the
+    // AP is configured and broadcasting — the laptop can connect and
+    // pull DHCP immediately. We deliberately skip AP_STARTING and go
+    // straight to AP_UP rather than waiting on ARDUINO_EVENT_WIFI_AP_START,
+    // because that event's dispatch goes through APClass::_onApEvent
+    // which posts via Network — and after our WiFi.mode(WIFI_OFF)
+    // → WiFi.mode(WIFI_AP) cycle the registration chain is unreliable
+    // enough on Arduino-ESP32 3.3.11 that the event frequently never
+    // reaches our sink. Station join/leave still flow through the
+    // same dispatch and DO work; we just don't gate the state on the
+    // start event itself.
+    if (s_hal.apStations) s_apClients = s_hal.apStations();
+
+    setError("");
+    setState(NetState::AP_UP);
+}
+
+void stopAp() {
+    if (s_state != NetState::AP_STARTING &&
+        s_state != NetState::AP_UP) {
+        return;
+    }
+    if (s_hal.stopAp) s_hal.stopAp();
+    s_apClients = 0;
+    clearApEvents();
+    setError("");
+    setState(NetState::IDLE);
 }
 
 // ─── the state machine ──────────────────────────────────────────────────────
@@ -418,6 +570,71 @@ void poll() {
     case NetState::IDLE:
     case NetState::SCAN_DONE:
     case NetState::SCAN_FAILED:
+    case NetState::AP_FAILED:
+    default:
+        break;
+    }
+
+    // AP state machine. Kept OUT of the switch above on purpose:
+    // the AP branches are short and event-driven, and splitting them
+    // out keeps the original STA diagram legible.
+    switch (s_state) {
+    case NetState::AP_STARTING: {
+        if (s_evApStart.exchange(false)) {
+            // Sync the count from the driver the first time we land in
+            // AP_UP, in case stations were already associated before
+            // the event fired (rare, but happens on a fast retry).
+            if (s_hal.apStations) s_apClients = s_hal.apStations();
+            setError("");
+            setState(NetState::AP_UP);
+            break;
+        }
+        if (t - s_stateAt >= kApStartTimeoutMs) {
+            if (s_hal.stopAp) s_hal.stopAp();
+            s_apClients = 0;
+            clearApEvents();
+            setError("ap timeout");
+            setState(NetState::AP_FAILED);
+        }
+        break;
+    }
+
+    case NetState::AP_UP: {
+        // Drain station join/leave events. Both can stack between
+        // polls, so we loop until the flag clears.
+        bool any = false;
+        if (s_evApJoined.exchange(false)) {
+            if (s_apClients < kApMaxStations) s_apClients++;
+            any = true;
+        }
+        if (s_evApLeft.exchange(false)) {
+            if (s_apClients > 0) s_apClients--;
+            any = true;
+        }
+        // Re-sync with the driver every 2 s as a safety net. The
+        // AP_STACONNECTED / AP_STADISCONNECTED events go through the
+        // same APClass::_onApEvent → Network.postEvent dispatch as the
+        // AP_START event, and after the WiFi.mode(WIFI_OFF) cycle a
+        // missed join/leave is plausible. esp_wifi_ap_get_sta_list is
+        // cheap; the trade is worth a guaranteed-correct count.
+        static uint32_t s_lastApSync = 0;
+        if (s_hal.apStations && (any || t - s_lastApSync >= 2000)) {
+            const uint8_t live = s_hal.apStations();
+            if (live != s_apClients) {
+                if (live <= kApMaxStations) s_apClients = live;
+                else                       s_apClients = kApMaxStations;
+            }
+            s_lastApSync = t;
+        }
+
+        if (s_evApStop.exchange(false)) {
+            s_apClients = 0;
+            setError("");
+            setState(NetState::IDLE);
+        }
+        break;
+    }
+
     default:
         break;
     }
@@ -442,13 +659,30 @@ void notifyDisconnected(uint8_t reason) {
     s_evDisconnected.store(true);
 }
 
+void notifyApStart()        { s_evApStart.store(true); }
+void notifyApStop()         { s_evApStop.store(true); }
+void notifyApStationJoined(){ s_evApJoined.store(true); }
+void notifyApStationLeft()  { s_evApLeft.store(true); }
+
 // ─── observation ────────────────────────────────────────────────────────────
 
 NetState      state()            { return s_state; }
-bool          isConnected()      { return s_state == NetState::CONNECTED; }
-uint32_t      localIP()          { return s_ip; }
+bool          isConnected()      { return s_state == NetState::CONNECTED ||
+                                        s_state == NetState::AP_UP; }
+uint32_t      localIP()          {
+    // In STA mode this is the DHCP lease (set by the GOT_IP event).
+    // In AP mode the device has no DHCP lease of its own — it IS the
+    // DHCP server — so we report the locked AP-side address instead.
+    // Without this the web UI shows "Offline" even though the device
+    // is fully reachable on 192.168.73.1.
+    if (s_mode == NetMode::ACCESS_POINT) return kApIpAddr;
+    return s_ip;
+}
 const char*   connectedSSID()    { return s_connectedSsid; }
 NetCredSource credentialSource() { return s_source; }
+NetMode       mode()             { return s_mode; }
+const char*   apSsid()           { return kApSsid; }
+uint8_t       apStations()       { return s_apClients; }
 const char*   lastErrorMessage() { return s_error; }
 uint32_t      stateChangedAt()   { return s_stateAt; }
 int           scanCount()        { return s_scanCount; }
@@ -472,6 +706,7 @@ uint32_t secondsUntilRetry() {
 void resetForTest() {
     s_state       = NetState::IDLE;
     s_stateAt     = 0;
+    s_mode        = NetMode::STATION;
     s_scanCount   = 0;
     s_error[0]    = '\0';
     s_ssid[0]     = '\0';
@@ -482,7 +717,9 @@ void resetForTest() {
     s_ip          = 0;
     s_backoffMs   = kBackoffStartMs;
     s_retryAt     = 0;
+    s_apClients   = 0;
     clearEvents();
+    clearApEvents();
     s_evIp.store(0);
     s_evReason.store(0);
 }
@@ -571,6 +808,68 @@ void halDisconnect() {
     WiFi.disconnect(/*wifioff=*/false, /*eraseap=*/true);
 }
 
+void halInitAp(uint32_t ip, uint32_t gw, uint32_t mask) {
+    WiFi.mode(WIFI_AP);
+
+    // Apply the locked 192.168.73.0/24 layout. softAPConfig must be
+    // called BEFORE softAP, otherwise the default 192.168.4.0/24 sticks.
+    if (ip) {
+        WiFi.softAPConfig(
+            IPAddress((uint8_t)(ip >> 24), (uint8_t)(ip >> 16),
+                      (uint8_t)(ip >>  8), (uint8_t)(ip)),
+            IPAddress((uint8_t)(gw >> 24), (uint8_t)(gw >> 16),
+                      (uint8_t)(gw >>  8), (uint8_t)(gw)),
+            IPAddress((uint8_t)(mask >> 24), (uint8_t)(mask >> 16),
+                      (uint8_t)(mask >>  8), (uint8_t)(mask)));
+    }
+}
+
+bool halStartAp(const char* ssid, const char* pass) {
+    // The first softAP() call from a device that booted in STA mode
+    // fails with no useful error if we only call WiFi.mode(WIFI_AP):
+    // esp_wifi_set_mode() returns ESP_ERR_WIFI_STATE while the STA
+    // interface is still tearing down (WiFi.disconnect() does not
+    // block for the disconnect to complete). On Arduino-ESP32 3.3.11
+    // the only reliable path is a full radio cycle: WIFI_OFF powers
+    // the driver down synchronously, WIFI_AP re-inits cleanly into
+    // AP-only mode.
+    if (WiFi.getMode() != WIFI_AP) {
+        WiFi.mode(WIFI_OFF);
+        WiFi.mode(WIFI_AP);
+        WiFi.softAPConfig(
+            IPAddress((uint8_t)(WifiMgr::kApIpAddr >> 24),
+                      (uint8_t)(WifiMgr::kApIpAddr >> 16),
+                      (uint8_t)(WifiMgr::kApIpAddr >>  8),
+                      (uint8_t)(WifiMgr::kApIpAddr)),
+            IPAddress((uint8_t)(WifiMgr::kApGwAddr >> 24),
+                      (uint8_t)(WifiMgr::kApGwAddr >> 16),
+                      (uint8_t)(WifiMgr::kApGwAddr >>  8),
+                      (uint8_t)(WifiMgr::kApGwAddr)),
+            IPAddress((uint8_t)(WifiMgr::kApNetmask >> 24),
+                      (uint8_t)(WifiMgr::kApNetmask >> 16),
+                      (uint8_t)(WifiMgr::kApNetmask >>  8),
+                      (uint8_t)(WifiMgr::kApNetmask)));
+    }
+
+    // Channel 1, hidden=0, max=kApMaxStations. Empty passphrase
+    // opens the AP (softAP accepts nullptr for that case).
+    return WiFi.softAP(ssid,
+                       (pass && pass[0]) ? pass : nullptr,
+                       /*channel=*/1,
+                       /*ssid_hidden=*/0,
+                       /*max_connection=*/WifiMgr::kApMaxStations) != 0;
+}
+
+void halStopAp() {
+    // wifioff=false — keep the radio subsystem alive so a subsequent
+    // startAp() does not have to re-initialise the Wi-Fi driver.
+    WiFi.softAPdisconnect(/*wifioff=*/false);
+}
+
+uint8_t halApStations() {
+    return WiFi.softAPgetStationNum();
+}
+
 uint32_t halMillis() {
     return millis();
 }
@@ -589,7 +888,28 @@ void bindPlatformHal() {
     hal.scanDelete   = halScanDelete;
     hal.beginSta     = halBeginSta;
     hal.disconnect   = halDisconnect;
+    hal.initAp       = halInitAp;
+    hal.startAp      = halStartAp;
+    hal.stopAp       = halStopAp;
+    hal.apStations   = halApStations;
     setHalForTest(hal);   // same setter; resets state, does no radio work
+
+    // Register AP event handlers. STA handlers were already installed
+    // by halInitSta() on the first call from begin(), but begin()
+    // might not have run yet at this point — and in any case, the
+    // handlers are idempotent (they just record flags).
+    WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t) {
+        WifiMgr::notifyApStart();
+    }, ARDUINO_EVENT_WIFI_AP_START);
+    WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t) {
+        WifiMgr::notifyApStop();
+    }, ARDUINO_EVENT_WIFI_AP_STOP);
+    WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t) {
+        WifiMgr::notifyApStationJoined();
+    }, ARDUINO_EVENT_WIFI_AP_STACONNECTED);
+    WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t) {
+        WifiMgr::notifyApStationLeft();
+    }, ARDUINO_EVENT_WIFI_AP_STADISCONNECTED);
 }
 
 }  // namespace WifiMgr

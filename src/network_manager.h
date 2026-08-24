@@ -53,6 +53,9 @@ enum class NetState : uint8_t {
     CONNECTED,       ///< associated and addressed
     CONNECT_FAILED,  ///< association failed; see lastErrorMessage()
     DISCONNECTED,    ///< was connected, link dropped, retry pending
+    AP_STARTING,     ///< softAP call in flight, awaiting AP_START
+    AP_UP,           ///< soft-AP up, accepting clients
+    AP_FAILED,       ///< softAP failed to come up; see lastErrorMessage()
 };
 
 /// Where the active credentials came from, for the status line.
@@ -92,6 +95,21 @@ struct NetHal {
     bool     (*beginSta)(const char* ssid, const char* pass) = nullptr;
     /// Disassociate and stop retrying.
     void     (*disconnect)()                   = nullptr;
+
+    /// AP side. Each role gets its own entry points so the test fake
+    /// can drive them independently.
+    /// Configure the AP interface with a static IP/gateway/mask
+    /// (host byte order, so 0xC0A84901 = 192.168.73.1). Called once
+    /// from begin() when mode == AP.
+    void     (*initAp)(uint32_t ip, uint32_t gw, uint32_t mask) = nullptr;
+    /// Bring up the soft-AP. Returns false if the call itself failed.
+    /// `pass` may be empty for an open AP.
+    bool     (*startAp)(const char* ssid, const char* pass) = nullptr;
+    /// Take the AP down. NVS is untouched by the platform layer.
+    void     (*stopAp)()                       = nullptr;
+    /// Current count of associated stations, reported by the driver.
+    /// Used by the N-screen "clients: N/4" line.
+    uint8_t  (*apStations)()                   = nullptr;
 };
 
 namespace WifiMgr {
@@ -105,6 +123,22 @@ inline constexpr int kMaxScanResults = 24;
 /// Reduced from 6 → 4 to allow the larger 20 px font used by
 /// CardputerDisplay::showWifiScanList. See docs/network.md §3.1.
 inline constexpr int kPageSize = 4;
+
+/// Fixed SSID of our access point. The literal is persisted nowhere;
+/// it's the single source of truth used by startAp(), the N-screen
+/// renderer, and the AP password input screen.
+inline constexpr const char* kApSsid = "A1Keyer";
+
+/// Maximum simultaneous stations we accept. Matches the Arduino
+/// `WiFi.softAP()` default. The N-screen "clients: N/4" line uses
+/// this as its denominator.
+inline constexpr int kApMaxStations = 4;
+
+/// Hard-coded AP-side addressing. The user asked for 192.168.73.0/24
+/// with the device on .1 (docs/network.md §13).
+inline constexpr uint32_t kApIpAddr   = 0xC0A84901;   // 192.168.73.1
+inline constexpr uint32_t kApGwAddr   = 0xC0A84901;   // 192.168.73.1
+inline constexpr uint32_t kApNetmask  = 0xFFFFFF00;   // 255.255.255.0
 
 // ── lifecycle ───────────────────────────────────────────────────────────
 
@@ -133,12 +167,30 @@ void connect(int scanIndex, const char* pass);
 /// Associate using the stored credentials. No-op when none exist.
 void connectWithSaved();
 
-/// Disassociate and erase the stored credentials.
+/// Disassociate and erase the stored credentials. STA-only behaviour.
 void disconnectAndForget();
+
+/// Drop whatever link is up (STA or AP) without erasing stored
+/// credentials. No-op in IDLE. After this returns, the manager is
+/// back to IDLE and the user can flip mode without re-entering
+/// passwords. Companion to `startAp` / `connectWithSaved`.
+void disconnectCurrent();
 
 /// Re-attempt the last connection immediately, ignoring any pending
 /// backoff.
 void retry();
+
+/// Bring up the access point with the fixed SSID "A1Keyer" and the
+/// given passphrase (may be empty for an open AP). The passphrase
+/// and the mode flag are persisted to NVS as a side effect, so
+/// flipping back to AP later does not require retyping.
+/// No-op when an AP is already up.
+void startAp(const char* pass);
+
+/// Take the access point down. NVS is untouched — the passphrase
+/// remains in flash so the user can re-enter AP mode without
+/// retyping. No-op when no AP is up.
+void stopAp();
 
 // ── observation ─────────────────────────────────────────────────────────
 
@@ -148,6 +200,18 @@ uint32_t      localIP();          ///< 0 when not connected
 const char*   connectedSSID();    ///< "" when not connected
 NetCredSource credentialSource();
 bool          hasSavedCredentials();
+
+/// Current radio role. STA by default; AP after `startAp`.
+NetMode       mode();
+
+/// Fixed SSID of our access point. Always returns the literal
+/// "A1Keyer". Exposed so the renderer can show it on the AP-mode
+/// info screen without hard-coding the string in two places.
+const char*   apSsid();
+
+/// Number of stations currently associated with our AP (0..4). Only
+/// meaningful when mode() == ACCESS_POINT.
+uint8_t       apStations();
 
 /// Short, user-facing explanation of the most recent failure. Never
 /// null; empty when nothing has failed.
@@ -168,6 +232,12 @@ uint32_t secondsUntilRetry();
 void notifyScanDone();
 void notifyGotIp(uint32_t ip);
 void notifyDisconnected(uint8_t reason);
+
+// AP-mode events.
+void notifyApStart();
+void notifyApStop();
+void notifyApStationJoined();
+void notifyApStationLeft();
 
 // ── test seam ───────────────────────────────────────────────────────────
 

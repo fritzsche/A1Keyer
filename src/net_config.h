@@ -18,9 +18,11 @@
  *    from the first release; adding "remember several networks" later is
  *    then a UI change, not a migration.
  *
- *  - Static-address and access-point fields are present, persisted and
- *    round-tripped, but not yet surfaced in the UI. They are the seam for
- *    the next iteration.
+ *  - The AP passphrase lives in its own key (`ap_pass`) and is
+ *    round-tripped separately from the STA passphrases so that
+ *    flipping modes never requires retyping either password. The
+ *    AP-mode SSID is the literal string "A1Keyer" and is not stored
+ *    — see docs/network.md §13.
  *
  * Everything here is free functions over a plain struct so the whole
  * module can be exercised on the host against a mock Preferences —
@@ -48,7 +50,7 @@ enum class IpMode : uint8_t {
 /// Which role the radio takes.
 enum class NetMode : uint8_t {
     STATION = 0,
-    ACCESS_POINT = 1,   ///< reserved; not yet exposed in the UI
+    ACCESS_POINT = 1,
 };
 
 /// One stored access point.
@@ -76,6 +78,13 @@ struct NetConfig {
     // Reserved for access-point mode.
     NetMode mode = NetMode::STATION;
 
+    /// AP passphrase. SSID is the fixed string "A1Keyer" and is not
+    /// persisted; storing it would just bloat NVS. Empty = open AP.
+    /// Lives in a separate namespace key from the STA passphrases so
+    /// toggling modes never requires retyping either (docs/network.md
+    /// §13).
+    char apPass[kPassBufLen] = {0};
+
     /// True when at least one credential is stored.
     bool hasCredentials() const { return count > 0 && !nets[0].isEmpty(); }
 };
@@ -101,6 +110,17 @@ bool netConfigClear();
 /// reserved addressing fields. This is the path the scan-and-connect UI
 /// uses today.
 bool netConfigSaveSingle(const char* ssid, const char* pass);
+
+/// Store the AP passphrase and flip `mode` to ACCESS_POINT. Preserves
+/// every existing STA credential and reserved field. Empty `pass`
+/// opens the AP without encryption. The SSID itself is fixed
+/// ("A1Keyer") and is not persisted.
+bool netConfigSaveAp(const char* pass);
+
+/// Erase the AP passphrase. Keeps `mode` (the user's previous choice
+/// about which role they want) and keeps every STA credential. Used
+/// when the user explicitly wants the AP to come up open next time.
+bool netConfigClearAp();
 
 /// Copy `src` into `dst` (capacity `cap`, including terminator),
 /// truncating if necessary and always terminating. Exposed because both

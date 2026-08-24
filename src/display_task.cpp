@@ -64,7 +64,9 @@ void DisplayTask::begin(DisplayInterface* display) {
                 const bool wifiUiScreen =
                     m.screen() == DisplayScreen::WIFI_SCAN_LIST ||
                     m.screen() == DisplayScreen::WIFI_PASSWORD_INPUT ||
-                    m.screen() == DisplayScreen::WIFI_NETWORK_INFO;
+                    m.screen() == DisplayScreen::WIFI_AP_PASSWORD_INPUT ||
+                    m.screen() == DisplayScreen::WIFI_NETWORK_INFO ||
+                    m.screen() == DisplayScreen::WIFI_NETWORK_INFO_CONFIRM;
 
                 if (displayActive && !wifiUiScreen) {
                     if (millis() - m.lastActivity() >= MorseModel::DISPLAY_TIMEOUT_MS) {
@@ -132,7 +134,9 @@ void DisplayTask::begin(DisplayInterface* display) {
                 const bool isWifiScreen =
                     m.screen() == DisplayScreen::WIFI_SCAN_LIST ||
                     m.screen() == DisplayScreen::WIFI_PASSWORD_INPUT ||
-                    m.screen() == DisplayScreen::WIFI_NETWORK_INFO;
+                    m.screen() == DisplayScreen::WIFI_AP_PASSWORD_INPUT ||
+                    m.screen() == DisplayScreen::WIFI_NETWORK_INFO ||
+                    m.screen() == DisplayScreen::WIFI_NETWORK_INFO_CONFIRM;
                 if (m.screen() != DisplayScreen::DECODER && !isWifiScreen) {
                     if (millis() - m.overlayStartMillis() >= MorseModel::OVERLAY_TIMEOUT_MS) {
                         m.setScreen(DisplayScreen::DECODER);

@@ -649,7 +649,12 @@ button.primary{background:var(--accent);color:#0e1116;border-color:var(--accent)
     var wifi = $("wifi");
     if (s.wifiIP && s.wifiIP !== "0.0.0.0"){
       wifi.className = "pill on";
-      wifi.innerHTML = '<span class="dot"></span>Connected ' + s.wifiIP;
+      // "AP" prefix when the device itself is the access point, so
+      // the operator doesn't misread "Connected 192.168.73.1" as a
+      // STA-mode DHCP lease. Either label is technically true; the
+      // distinction is which side of the link the device is on.
+      var tag = s.wifiMode === "ap" ? "AP " : "Connected ";
+      wifi.innerHTML = '<span class="dot"></span>' + tag + s.wifiIP;
     } else {
       wifi.className = "pill off";
       wifi.innerHTML = '<span class="dot"></span>Offline';

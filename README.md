@@ -127,8 +127,10 @@ The Cardputer target shares all platform-independent code (`morse_encoder`,
   [Keying your radio](#keying-your-radio-optocoupler-wiring) and
   [`docs/keyer.md`](docs/keyer.md).
 - **Wi-Fi + web interface** — scan and join a WLAN from the device
-  keyboard, then control the keyer from a browser: live decode view,
-  settings, and memory editing/playback. See
+  keyboard, or press **A** to turn the device itself into a Wi-Fi
+  access point (`A1Keyer`, `192.168.73.1`). Either way, control the
+  keyer from a browser: live decode view, settings, and memory
+  editing/playback. See
   [Wi-Fi and the web interface](#wi-fi-and-the-web-interface).
 - **Click-free audio** — Blackman-Harris envelopes eliminate the keying
   transients you hear on cheaper keyers.
@@ -295,6 +297,7 @@ them. To hook up your logger:
 
 A1Keyer joins your WLAN as a normal station and serves a dark,
 mobile-responsive **web interface** on port 80 — no app, no cloud.
+It can also act as its own access point when no WLAN is available.
 
 ### Connect the device to your WLAN
 
@@ -312,13 +315,29 @@ Everything happens on the device keyboard (no rebuild, no config files):
 Credentials persist in NVS and auto-connect at every boot (association
 runs in the background — boot is never delayed). Wrong password, missing
 network, and signal loss each get a plain-language message on the `N`
-screen. `X` disconnects and **forgets** the stored network; `R` retries.
-Details: [`docs/network.md`](docs/network.md).
+screen. `X` opens a **Y/N** confirmation and, on **Y**, forgets the
+stored network; `R` retries. Details: [`docs/network.md`](docs/network.md).
+
+### Or run the device as a Wi-Fi access point
+
+When there's no WLAN handy — at a picnic table, in the car, at the
+field-day site — press **A** instead of `C`. The device announces the
+fixed SSID `A1Keyer` on `192.168.73.1/24` (DHCP-leases `.2..N`,
+defaulting to `4` clients). Type a passphrase on the same editor as the
+STA password screen; the password persists, so rebooting does not
+require retyping it. Press **N** to see the connected-station count.
+
+Mode is persisted: a reboot comes back in the mode the user last
+chose. The AP password and the STA password live in separate NVS keys,
+so toggling modes never destroys either. `X` on the N-screen drops the
+AP without erasing the passphrase; the equivalent in STA mode still
+requires a Y/N confirmation because it does erase. See
+[`docs/network.md § 13`](docs/network.md#13-access-point-mode).
 
 ### Use the web interface
 
-With the device on your network, open **`http://<device-ip>/`** in any
-browser (the IP is shown on the `N` network-info screen):
+With the device on your network (either as STA or AP), open
+**`http://<device-ip>/`** in any browser:
 
 - **Live decode** — a scrolling view of the decoded CW text, refreshed
   twice a second.
@@ -335,8 +354,8 @@ browser (the IP is shown on the `N` network-info screen):
 Under the hood it's three JSON endpoints (`POST /api/settings`,
 `POST /api/memory`, `POST /api/play`) plus `GET /state` — scriptable from
 curl if you want. The web server is compiled into the standard Cardputer
-build; see `src/web_ui.cpp` and [`docs/network.md § 12`](docs/network.md#12-future-work)
-for what's next (static addressing, AP mode).
+build; see `src/web_ui.cpp` and [`docs/network.md`](docs/network.md)
+for what's next (static addressing, custom DHCP range).
 
 ---
 
@@ -373,7 +392,8 @@ decoder** with the last ~200 characters of decoded text.
 | **K** | Open **Radio Keying** settings screen (On / Off). When On, holding `K` on the decoder screen keys the radio as a straight key. See [`docs/keyer.md`](docs/keyer.md). |
 | **D** | Toggle the USB serial port between **Console** and **WinKey** mode (see [WinKey support](#winkey-wk2-support)) |
 | **C** | Open **Wi-Fi configuration**: scan, pick an SSID, enter the password |
-| **N** | Open the **network info** screen: state, SSID, IP address; `X` forgets, `R` retries |
+| **A** | Open **access-point configuration**: bring up `A1Keyer` as a Wi-Fi AP (press `N` for the connected-station count) |
+| **N** | Open the **network info** screen: state, SSID, IP address; `X` forgets (STA) or drops the AP, `R` retries |
 | **S** | Open **paddle polarity** settings screen (Normal / Reversed). Reversed swaps dit/dah on the paddle levers — iambic keyer only. |
 | `;` | Increment value (WPM +1, freq +10 Hz, volume +10) — or select **On** in Radio Keying, **Normal** in Polarity |
 | `.` | Decrement value — or select **Off** in Radio Keying, **Reversed** in Polarity |

@@ -324,6 +324,94 @@ static void test_count_without_ssid_is_not_usable() {
     CHECK(!cfg.hasCredentials());
 }
 
+// ─── AP passphrase ──────────────────────────────────────────────────────────
+
+static void test_ap_password_round_trip() {
+    prefsMockReset();
+    CHECK(netConfigSaveAp("ap-secret"));
+
+    NetConfig cfg;
+    netConfigLoad(cfg);
+    CHECK_STR_EQ("ap-secret", cfg.apPass);
+    CHECK(cfg.mode == NetMode::ACCESS_POINT);
+}
+
+static void test_ap_password_open_when_empty() {
+    prefsMockReset();
+    CHECK(netConfigSaveAp(""));
+
+    NetConfig cfg;
+    netConfigLoad(cfg);
+    CHECK_STR_EQ("", cfg.apPass);
+    CHECK(cfg.mode == NetMode::ACCESS_POINT);
+}
+
+// Saving the AP password MUST NOT touch the STA credentials — that is
+// the whole point of keeping them in separate keys.
+static void test_save_ap_preserves_sta_credentials() {
+    prefsMockReset();
+    CHECK(netConfigSaveSingle("HomeWiFi", "sta-pw"));
+
+    CHECK(netConfigSaveAp("ap-pw"));
+
+    NetConfig cfg;
+    netConfigLoad(cfg);
+    CHECK_STR_EQ("HomeWiFi", cfg.nets[0].ssid);
+    CHECK_STR_EQ("sta-pw",   cfg.nets[0].pass);
+    CHECK_STR_EQ("ap-pw",    cfg.apPass);
+}
+
+// And vice versa: saving a STA credential after the AP password was
+// set must not erase the AP password.
+static void test_save_sta_preserves_ap_password() {
+    prefsMockReset();
+    CHECK(netConfigSaveAp("ap-pw"));
+
+    CHECK(netConfigSaveSingle("HomeWiFi", "sta-pw"));
+
+    NetConfig cfg;
+    netConfigLoad(cfg);
+    CHECK_STR_EQ("HomeWiFi", cfg.nets[0].ssid);
+    CHECK_STR_EQ("sta-pw",   cfg.nets[0].pass);
+    CHECK_STR_EQ("ap-pw",    cfg.apPass);
+    CHECK(cfg.mode == NetMode::ACCESS_POINT);   // mode NOT reset by STA save
+}
+
+static void test_clear_ap_keeps_sta_credentials() {
+    prefsMockReset();
+    CHECK(netConfigSaveSingle("HomeWiFi", "sta-pw"));
+    CHECK(netConfigSaveAp("ap-pw"));
+    CHECK(netConfigClearAp());
+
+    NetConfig cfg;
+    netConfigLoad(cfg);
+    CHECK_STR_EQ("HomeWiFi", cfg.nets[0].ssid);
+    CHECK_STR_EQ("sta-pw",   cfg.nets[0].pass);
+    CHECK_STR_EQ("",         cfg.apPass);
+    // Mode flag stays whatever it was — clearing the AP pw is about
+    // "open the next AP", not "leave AP mode".
+}
+
+static void test_clear_erases_ap_password_too() {
+    prefsMockReset();
+    CHECK(netConfigSaveAp("ap-pw"));
+    CHECK(netConfigClear());
+
+    NetConfig cfg;
+    netConfigLoad(cfg);
+    CHECK_STR_EQ("", cfg.apPass);
+    CHECK(cfg.mode == NetMode::STATION);
+}
+
+static void test_ap_password_truncates_at_max_len() {
+    prefsMockReset();
+    const std::string huge(100, 'Q');
+    CHECK(netConfigSaveAp(huge.c_str()));
+    NetConfig cfg;
+    netConfigLoad(cfg);
+    CHECK_EQ(kPassBufLen - 1, std::string(cfg.apPass).size());
+}
+
 int main() {
     RUN(test_copy_str_basic);
     RUN(test_copy_str_truncates_and_terminates);
@@ -354,5 +442,13 @@ int main() {
 
     RUN(test_corrupt_count_is_clamped);
     RUN(test_count_without_ssid_is_not_usable);
+
+    RUN(test_ap_password_round_trip);
+    RUN(test_ap_password_open_when_empty);
+    RUN(test_save_ap_preserves_sta_credentials);
+    RUN(test_save_sta_preserves_ap_password);
+    RUN(test_clear_ap_keeps_sta_credentials);
+    RUN(test_clear_erases_ap_password_too);
+    RUN(test_ap_password_truncates_at_max_len);
     return test_summary();
 }

@@ -307,14 +307,34 @@ public:
     void showWifiPasswordInput(MorseModel& model) override;
 
     /**
+     * showWifiApPasswordInput — render the AP passphrase entry screen.
+     *
+     * Same layout as the STA password screen but with the SSID line
+     * locked to "A1Keyer (AP)" and a different title ("AP pw").
+     *
+     * @param model  MorseModel reference.
+     */
+    void showWifiApPasswordInput(MorseModel& model) override;
+
+    /**
      * showWifiNetworkInfo — render the network status / info screen.
      *
-     * Shows the connection state, SSID, IP address (or the latest error
-     * message in red), and a hint row with X: forget, R: retry, ENTER: back.
+     * Mode-aware. STA: state, SSID, IP/error, retry countdown, hint.
+     * AP: state, SSID, IP, stations count, hint.
      *
      * @param model  MorseModel reference.
      */
     void showWifiNetworkInfo(MorseModel& model) override;
+
+    /**
+     * showNetConfirmForget — render the "Forget network? (Y/N)"
+     * overlay on top of showWifiNetworkInfo. The underlying network
+     * info is already on screen from the same frame's earlier draw;
+     * this method paints the modal box, the prompt, and the Y/N hint.
+     *
+     * @param model  MorseModel reference.
+     */
+    void showNetConfirmForget(MorseModel& model) override;
 
     /**
      * showMemoryPick — slot picker overlay for the memory keyer.
