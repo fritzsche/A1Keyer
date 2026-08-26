@@ -146,29 +146,98 @@ Playback rules — unchanged from International mode:
   inter-character gap (the encoder silently skips characters it cannot
   encode in the current table).
 
+### 3.1 Callsign conventions in Japanese QSOs
+
+In Japanese amateur radio practice (JARL), callsigns are **always
+sent in International Morse code (欧文 / Ōbun)**, even during a
+Wabun-only QSO. This is true for:
+
+- The station identifying itself (`CQ CQ DE JA1ABC JA1ABC K`)
+- Acknowledging the other station (`JA1ABC DE JA2XYZ …`)
+- Report exchanges (`599` is identical in both alphabets)
+- Signal reports, grid squares, Q-codes (`QTH`, `QSL`, `RST`)
+
+Only the **Japanese-language conversational text** between callsigns
+— greetings, names, locations, weather reports, contest exchanges —
+is sent in Wabun. The Wabun run is framed by the prosigns **DO**
+(`-..-..`, "begin Wabun") and **SN** (`...-.`, "end Wabun / correct
+Wabun").
+
+Example flow on the air (from JA1ABC to JA2XYZ):
+
+```
+CQ CQ DE JA1ABC JA1ABC K     <- all International Morse
+DO                            <- switch to Wabun
+オハヨウゴザイマス            <- "OHAYO U GOZAIMASU" (good morning)
+SN                            <- back to International
+JA2XYZ DE JA1ABC              <- all International Morse
+DO                            <- switch to Wabun
+コンバンハ                     <- "KONBANWA" (good evening)
+SN
+JA1ABC DE JA2XYZ RST 599 599  <- International Morse (RST, reports)
+DO
+アリガトウ                    <- "ARIGATOU" (thank you)
+SK                            <- end of contact (International prosign)
+```
+
+#### Practical implications for A1Keyer
+
+- **Memory slots** are the right place to store callsign macros.
+  Store them as plain Latin text — they will play back in
+  International Morse even when the device is in Wabun mode
+  (Latin characters are silently skipped by the Wabun encoder,
+  then the encoder falls back to the International table for any
+  unmappable character... actually, the *current* encoder uses a
+  single table at a time, so Latin characters in Wabun mode are
+  **skipped**). Best practice: **switch to International mode
+  briefly** to send callsigns and signal reports, then switch back
+  to Wabun for the Japanese-language exchange.
+
+- **Mixed-text memory slots** (callsign + Wabun greeting) do NOT
+  work cleanly: the Wabun encoder skips Latin letters and the
+  International encoder skips Japanese characters. A future
+  enhancement could mix tables per-character, but in the current
+  firmware a memory slot must be either pure Latin or pure
+  Wabun-compatible.
+
+- The current firmware does **not** automatically insert **DO** or
+  **SN** when sending Wabun from a memory slot. If you play a
+  Japanese macro with the device in Wabun mode, you are
+  responsible for keying `DO` before and `SN` after by hand.
+
+- Receiving: the decoder displays whatever it hears. If the
+  other station sends **DO**, the decoder will render it as
+  `<<er>>` (`........` — the International "error" prosign shares
+  that pattern), and **SN** will also render as `<ka>`. These
+  are known ambiguities — the operator must remember that DO/SN
+  are framing prosigns and ignore the garbage in the decoder
+  output.
+
 ---
 
 ## 4. Font installation on the Cardputer
 
-A1Keyer relies on **M5GFX**'s built-in Japanese IPA font (Gothic 12 pt)
-for the Cardputer display. The font is already shipped with the
-`M5GFX` library (the dependency is already declared in
+A1Keyer relies on **M5GFX**'s built-in Japanese IPA font
+(**Gothic 36 pt**) for the Cardputer display. The font is already
+shipped with the `M5GFX` library (the dependency is already declared in
 `platformio.ini`), so no extra installation is required.
 
 ### 4.1 What the firmware does
 
 When the Wabun mode is active, the main decoded-text renderer
 (`CardputerDisplay::renderScrollingText`) calls
-`M5.Display.setFont(&fonts::lgfxJapanGothic_12)` instead of the
+`M5.Display.setFont(&fonts::lgfxJapanGothic_36)` instead of the
 default `&fonts::FreeMono24pt7b`. Because `setFont()` selects a
 single font table at a time, and the build is linked with
 `-ffunction-sections -fdata-sections` (see `platformio.ini`), the
-linker only pulls the `lgfxJapanGothic_12` glyph table — the
+linker only pulls the `lgfxJapanGothic_36` glyph table — the
 other 35 sizes in the IPA family stay out of the firmware binary.
 
-The Gothic 12 pt table is ~109 KB of PROGMEM. A1Keyer's typical
-firmware size budget is ~1.5–2 MB; adding 109 KB is acceptable on
-the Cardputer ADV's 8 MB flash.
+The Gothic 36 pt table is ~466 KB of PROGMEM. A1Keyer's typical
+firmware size budget is ~1.5–2 MB; adding 466 KB fits comfortably on
+the Cardputer ADV's 8 MB flash. Smaller sizes (12 / 16 / 20 / 24)
+are available if a smaller flash footprint is needed — just change the
+symbol in `cardputer_display.cpp`.
 
 ### 4.2 Font license
 

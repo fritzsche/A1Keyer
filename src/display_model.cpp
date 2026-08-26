@@ -96,6 +96,9 @@ void MorseModel::setMorseTableMode(MorseTableMode mode) {
         table = &kWabunMorseTable;
     }
     MorseEncoder::setTable(table);
+    // Clear the decoded text buffer so old International-mode characters
+    // are not misinterpreted as multi-byte UTF-8 sequences.
+    clearDecodedText();
     incrementChangeCounter();
 }
 

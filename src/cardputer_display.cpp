@@ -1056,46 +1056,84 @@ void CardputerDisplay::renderScrollingText(const char* text, size_t textLen, siz
 
     auto& m = MorseModel::instance();
     size_t head = m.textHead();
-    size_t len = m.decodedTextLen();
+    size_t len = m.decodedTextLen();  // bytes in buffer
+    bool wabunMode = m.morseTableMode() != MorseTableMode::INTERNATIONAL;
 
     if (len == 0) {
         _scrollOffset = 0;
         M5.Display.setFont(&fonts::FreeMono24pt7b);
         M5.Display.setTextColor(0x7384);
-        M5.Display.setCursor(0, MAIN_Y + 45);
+        M5.Display.setCursor(0, MAIN_Y + 35);
         M5.Display.print("waiting...");
         M5.Display.setFont(nullptr);
         return;
     }
 
-    M5.Display.setFont(&fonts::FreeMono24pt7b);
-    int charW = M5.Display.textWidth("M");
-    int maxChars = (SCREEN_W - 2) / charW;
+    int charW;
+    int maxChars;
+    if (wabunMode) {
+        M5.Display.setFont(&fonts::lgfxJapanGothic_36);
+        charW = M5.Display.textWidth("\xe3\x82\xa2");
+        maxChars = (SCREEN_W - 2) / charW;
+    } else {
+        M5.Display.setFont(&fonts::FreeMono24pt7b);
+        charW = M5.Display.textWidth("M");
+        maxChars = (SCREEN_W - 2) / charW;
+    }
     M5.Display.setFont(nullptr);
 
+    // Count display characters (visual units) in the buffer.
+    size_t displayLen = 0;
+    size_t tail = m.textTail();
+    for (size_t bi = 0; bi < len; ) {
+        unsigned char c = (unsigned char)m.textAt((tail + bi) % TEXT_BUF_SIZE);
+        if (wabunMode && c >= 0xE0) {
+            bi += 3;
+        } else {
+            bi += 1;
+        }
+        ++displayLen;
+    }
+
     size_t start;
-    if (len <= (size_t)maxChars) {
-        start = 0;
+    if (displayLen <= (size_t)maxChars) {
+        start = tail;
     } else {
-        start = (head + TEXT_BUF_SIZE - maxChars) % TEXT_BUF_SIZE;
+        // Walk forward from tail to find the byte where the last maxChars
+        // display characters begin.
+        int skip = (int)(displayLen - maxChars);
+        size_t bi = tail;
+        for (int i = 0; i < skip; ++i) {
+            unsigned char c = (unsigned char)m.textAt(bi);
+            if (wabunMode && c >= 0xE0) {
+                bi = (bi + 3) % TEXT_BUF_SIZE;
+            } else {
+                bi = (bi + 1) % TEXT_BUF_SIZE;
+            }
+        }
+        start = bi;
     }
 
-    std::string dbg;
-    dbg.reserve(maxChars);
-    for (int i = 0; i < maxChars && i < (int)len; ++i) {
-        size_t idx = (start + i) % TEXT_BUF_SIZE;
-        char raw = m.textAt(idx);
-        dbg.push_back(raw == ' ' ? '_' : raw);
+    // In Wabun mode, align start to a UTF-8 sequence boundary.
+    if (wabunMode && len > 0) {
+        int sanity = 0;
+        while (sanity < 200) {
+            unsigned char b = (unsigned char)m.textAt(start);
+            if (b < 0x80 || b >= 0xC0) break;
+            start = (start + TEXT_BUF_SIZE - 1) % TEXT_BUF_SIZE;
+            ++sanity;
+        }
     }
-    Log::debug("[CD] renderScrollingText: len=%zu head=%zu start=%zu maxChars=%d -> \"%s\"",
-        len, head, start, maxChars, dbg.c_str());
 
-    M5.Display.setFont(&fonts::FreeMono24pt7b);
-    M5.Display.setCursor(0, MAIN_Y + 45);
+    M5.Display.setCursor(0, MAIN_Y + 35);
 
+    bool hiraganaMode = (m.morseTableMode() == MorseTableMode::WABUN_HIRAGANA);
     char lastAttr = 0;
-    for (int i = 0; i < maxChars && i < (int)len; ++i) {
-        size_t idx = (start + i) % TEXT_BUF_SIZE;
+    int bytePos = 0;
+    int displayPos = 0;
+    int totalBytes = (int)len;
+    while (bytePos < totalBytes && displayPos < maxChars) {
+        size_t idx = (start + bytePos) % TEXT_BUF_SIZE;
         char raw = m.textAt(idx);
         char attr = m.attrAt(idx);
 
@@ -1103,7 +1141,29 @@ void CardputerDisplay::renderScrollingText(const char* text, size_t textLen, siz
             M5.Display.setTextColor((attr == MorseModel::ATTR_PLAYER) ? COLOR_ACCENT : COLOR_FG);
             lastAttr = attr;
         }
-        M5.Display.print(raw == ' ' ? '_' : raw);
+
+        unsigned char b0 = (unsigned char)raw;
+
+        if (wabunMode && b0 >= 0xE0) {
+            const char b1 = (bytePos + 1 < totalBytes) ? m.textAt((start + bytePos + 1) % TEXT_BUF_SIZE) : 0;
+            const char b2 = (bytePos + 2 < totalBytes) ? m.textAt((start + bytePos + 2) % TEXT_BUF_SIZE) : 0;
+            char utf8[4] = {b0, b1, b2, 0};
+            if (hiraganaMode) {
+                char hira[8] = {0};
+                wabunKatakanaToHiragana(utf8, hira, sizeof(hira));
+                M5.Display.setFont(&fonts::lgfxJapanGothic_36);
+                M5.Display.print(hira);
+            } else {
+                M5.Display.setFont(&fonts::lgfxJapanGothic_36);
+                M5.Display.print(utf8);
+            }
+            bytePos += 3;
+        } else {
+            M5.Display.setFont(&fonts::FreeMono24pt7b);
+            M5.Display.print(raw == ' ' ? '_' : raw);
+            bytePos += 1;
+        }
+        ++displayPos;
     }
 
     M5.Display.setTextColor(COLOR_FG);
