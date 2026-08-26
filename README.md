@@ -80,6 +80,7 @@ customisation, or to target a different environment — see
 
 | Version | Date | Highlights |
 |---|---|---|
+| **[v0.6.0](https://github.com/fritzsche/A1Keyer/releases)** | *dev* | **Wabun (Japanese Morse) code** — press `J` for Katakana/Hiragana, IPA Gothic font on Cardputer, web UI selector |
 | **[v0.5.0](https://github.com/fritzsche/A1Keyer/releases)** | *current* | **AP mode** (press `A` to turn the device into a Wi-Fi access point), **forget-confirmation** on STA X key, **paddle polarity setting** (`S` key, Normal/Reversed), on-device web interface, WinKey WK2 emulation, CW memory keyer (10 slots). |
 | **[v0.4.0](https://github.com/fritzsche/A1Keyer/releases)** | *2026-08-18* | **WinKey WK2 emulation** over USB (logger-driven CW, RUMlogNG/N1MM/fldigi/WriteLog), **CW memory keyer** (10 slots, keyboard + web editing/playback), **on-device web interface** (settings + live decode view over Wi-Fi), **paddle polarity setting**, robust Wi-Fi provisioning. |
 | **[v0.3.0](https://github.com/fritzsche/A1Keyer/releases/tag/v0.3.0)** | *2026-08-13* | Bugfix release: Wi-Fi credentials persist across failed connects and reboots. |
@@ -393,7 +394,8 @@ decoder** with the last ~200 characters of decoded text.
 | **A** | Open **access-point configuration**: bring up `A1Keyer` as a Wi-Fi AP (press `N` for the connected-station count) |
 | **N** | Open the **network info** screen: state, SSID, IP address; `X` forgets (STA) or drops the AP, `R` retries |
 | **S** | Open **paddle polarity** settings screen (Normal / Reversed). Reversed swaps dit/dah on the paddle levers — iambic keyer only. |
-| `;` | Increment value (WPM +1, freq +10 Hz, volume +10) — or select **On** in Radio Keying, **Normal** in Polarity |
+| **J** | Open **Wabun mode** settings screen (International / Wabun Katakana / Wabun Hiragana). |
+| `;` | Increment value (WPM +1, freq +10 Hz, volume +10) — or select **On** in Radio Keying, **Normal** in Polarity, **cycle** in Wabun mode |
 | `.` | Decrement value — or select **Off** in Radio Keying, **Reversed** in Polarity |
 | **Enter** | Save current setting to flash (NVS) and close the screen |
 | **Esc** | Cancel the current screen / flow without saving |

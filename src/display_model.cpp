@@ -1,6 +1,7 @@
 #include "display_model.h"
 #include "Log.h"
 #include "text_input.h"
+#include "morse_encoder.h"
 #ifndef UNIT_TEST
 #include "audio_engine.h"
 #include "radio_keyer.h"
@@ -80,6 +81,21 @@ bool MorseModel::winkeyMode() const {
 void MorseModel::setWinkeyMode(bool on) {
     bool prev = _winkeyMode.exchange(on, std::memory_order_relaxed);
     if (prev == on) return;
+    incrementChangeCounter();
+}
+
+MorseTableMode MorseModel::morseTableMode() const {
+    return _morseTableMode.load(std::memory_order_relaxed);
+}
+
+void MorseModel::setMorseTableMode(MorseTableMode mode) {
+    MorseTableMode prev = _morseTableMode.exchange(mode, std::memory_order_relaxed);
+    if (prev == mode) return;
+    const MorseTable* table = &kInternationalMorseTable;
+    if (mode == MorseTableMode::WABUN_KATAKANA || mode == MorseTableMode::WABUN_HIRAGANA) {
+        table = &kWabunMorseTable;
+    }
+    MorseEncoder::setTable(table);
     incrementChangeCounter();
 }
 

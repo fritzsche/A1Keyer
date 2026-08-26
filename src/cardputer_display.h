@@ -284,6 +284,9 @@ public:
      */
     void showPolaritySettingsView(MorseModel& model) override;
 
+    /** Show the Wabun mode settings screen (International / Katakana / Hiragana). */
+    void showWabunSettingsView(MorseModel& model) override;
+
     /**
      * showWifiScanList — render the scan list / "Scanning…" / scan-failed screen.
      *

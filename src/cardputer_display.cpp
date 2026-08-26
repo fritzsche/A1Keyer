@@ -17,6 +17,7 @@
 #include "Log.h"
 #include "network_manager.h"
 #include "text_input.h"
+#include "MorseTable.h"
 #ifdef BOARD_CARDPUTER
 #include <M5Cardputer.h>
 #include <string>
@@ -113,6 +114,10 @@ void CardputerDisplay::render() {
         case DisplayScreen::MEMORY_EDIT:
             updateStatusLine(model);
             showMemoryEdit(model);
+            break;
+        case DisplayScreen::WABUN_SETTINGS:
+            updateStatusLine(model);
+            showWabunSettingsView(model);
             break;
         case DisplayScreen::DECODER:
         default:
@@ -389,6 +394,36 @@ void CardputerDisplay::showPolaritySettingsView(MorseModel& model) {
     M5.Display.setTextColor(0x7384);
     M5.Display.setCursor(0, MAIN_Y + 95);
     M5.Display.print(";: Normal  .: Reversed  ENTER: confirm");
+}
+
+void CardputerDisplay::showWabunSettingsView(MorseModel& model) {
+    M5.Display.setFont(nullptr);
+    M5.Display.setTextSize(2);
+    M5.Display.setTextColor(COLOR_FG);
+    M5.Display.setCursor(0, MAIN_Y + 4);
+    M5.Display.print("WABUN");
+
+    M5.Display.setFont(nullptr);
+    M5.Display.setTextSize(2);
+    M5.Display.setTextColor(COLOR_ACCENT);
+    M5.Display.setCursor(0, MAIN_Y + 28);
+    switch (model.morseTableMode()) {
+        case MorseTableMode::INTERNATIONAL:
+            M5.Display.print("International");
+            break;
+        case MorseTableMode::WABUN_KATAKANA:
+            M5.Display.print("Wabun Katakana");
+            break;
+        case MorseTableMode::WABUN_HIRAGANA:
+            M5.Display.print("Wabun Hiragana");
+            break;
+    }
+
+    M5.Display.setFont(nullptr);
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(0x7384);
+    M5.Display.setCursor(0, MAIN_Y + 95);
+    M5.Display.print(";/.: cycle   ENTER: confirm");
 }
 
 // ─── Wi-Fi screens ───────────────────────────────────────────────────────────

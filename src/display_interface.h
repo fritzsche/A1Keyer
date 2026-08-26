@@ -53,6 +53,9 @@ public:
     /** Show the paddle-polarity settings screen (Normal/Reversed toggle, ;/.). */
     virtual void showPolaritySettingsView(MorseModel& model) = 0;
 
+    /** Show the Wabun mode settings screen (International / Katakana / Hiragana). */
+    virtual void showWabunSettingsView(MorseModel& model) = 0;
+
     /** Show the Wi-Fi scan list / "Scanning…" / scan-failed screen. */
     virtual void showWifiScanList(MorseModel& model) = 0;
 

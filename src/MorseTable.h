@@ -7,33 +7,32 @@
  *
  * Tables:
  *   kInternationalMorseTable — default, covers A-Z, 0-9, punctuation, prosigns
- *   kWabunMorseTable        — Japanese kana (not yet implemented)
- *   kAmericanMorseTable     — American Morse (not yet implemented)
+ *   kWabunMorseTable         — Japanese kana (Wabun code, 和文モールス)
  */
 
 #include <cstddef>
 
+enum class MorseTableMode : int {
+    INTERNATIONAL   = 0,
+    WABUN_KATAKANA  = 1,
+    WABUN_HIRAGANA  = 2,
+};
+
 struct MorseEntry {
-    /** Dit-dah representation, e.g. ".-", "-...", etc. */
     const char* ditDah;
-    /** Character(s) this represents, e.g. "a", "1", "<ka>", "ä" */
     const char* chr;
 };
 
 struct MorseTable {
-    /** Human-readable name, e.g. "International", "Wabun", "American" */
     const char* name;
-    /** Array of entries */
     const MorseEntry* entries;
-    /** Number of entries */
     size_t count;
 };
 
-/** International Morse Code (default table). */
 extern const MorseTable kInternationalMorseTable;
 
-/** Wabun Morse (Japanese kana) — not yet implemented. */
 extern const MorseTable kWabunMorseTable;
 
-/** American Morse — not yet implemented. */
 extern const MorseTable kAmericanMorseTable;
+
+size_t wabunKatakanaToHiragana(const char* utf8, char* out, size_t cap);

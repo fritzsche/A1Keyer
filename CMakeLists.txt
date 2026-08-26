@@ -58,6 +58,7 @@ foreach(SUITE IN ITEMS
     test_diag_memory_radio
     test_diag_iambic_collision
     test_mg_keyed_boundary
+    test_wabun
 )
     add_executable(${SUITE}
         test/${SUITE}/${SUITE}.cpp

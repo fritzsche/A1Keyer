@@ -694,6 +694,7 @@ static void handleKeyboard() {
     static bool wasD = false;
     static bool wasC = false, wasN = false, wasA = false;
     static bool wasS = false;
+    static bool wasJ = false;
     static bool wasEnter = false, wasShift = false;
     static bool wasBtnA = false;
     static bool wasSemicolon = false, wasPeriod = false;
@@ -715,6 +716,7 @@ static void handleKeyboard() {
     bool nKey       = kb.isKeyPressed('N') || kb.isKeyPressed('n');
     bool aKey       = kb.isKeyPressed('A') || kb.isKeyPressed('a');
     bool sKey       = kb.isKeyPressed('S') || kb.isKeyPressed('s');
+    bool jKey       = kb.isKeyPressed('J') || kb.isKeyPressed('j');
     bool enter      = kb.isKeyPressed(KEY_ENTER);
     bool shift      = kb.keysState().shift;
     bool btnA       = M5Cardputer.BtnA.isPressed();
@@ -773,7 +775,7 @@ static void handleKeyboard() {
     // cut off audio after only a click of the first element.
     static bool s_wasAnyKeyHeld = false;
     const bool anyKeyHeld = wKey || fKey || pKey || vKey || mKey
-                          || kKey || dKey || cKey || nKey || aKey || sKey
+                          || kKey || dKey || cKey || nKey || aKey || sKey || jKey
                           || enter || semicolon || period;
     const bool anyKeyEdge = anyKeyHeld && !s_wasAnyKeyHeld;
     s_wasAnyKeyHeld = anyKeyHeld;
@@ -788,7 +790,7 @@ static void handleKeyboard() {
         // Same press still held — consume it: update wasX so the per-key
         // edge handlers below don't fire on this held press.
         wasW = wKey; wasF = fKey; wasP = pKey; wasV = vKey; wasM = mKey;
-        wasK = kKey; wasD = dKey; wasC = cKey; wasN = nKey; wasA = aKey; wasS = sKey;
+        wasK = kKey; wasD = dKey; wasC = cKey; wasN = nKey; wasA = aKey; wasS = sKey; wasJ = jKey;
         wasEnter = enter; wasShift = shift; wasBtnA = btnA;
         wasSemicolon = semicolon; wasPeriod = period;
         return;
@@ -968,6 +970,19 @@ static void handleKeyboard() {
         DisplayTask::requestRender();
     }
 
+    // J → Wabun mode settings (International / Katakana / Hiragana).
+    if (jKey && !wasJ &&
+        sc != DisplayScreen::WIFI_PASSWORD_INPUT &&
+        (sc == DisplayScreen::DECODER || sc == DisplayScreen::WABUN_SETTINGS)) {
+        if (sc == DisplayScreen::WABUN_SETTINGS) {
+            model.setScreen(DisplayScreen::DECODER);
+        } else {
+            model.setScreen(DisplayScreen::WABUN_SETTINGS);
+            model.setOverlayStartMillis(millis());
+        }
+        DisplayTask::requestRender();
+    }
+
     // P → start Morse encoder playback. Suppressed while a memory
     // input field has focus — typing P as part of a contest macro
     // ("TEST DE W1AW POTA K") would otherwise fire "Hello Morse!"
@@ -1051,6 +1066,22 @@ static void handleKeyboard() {
     else if (model.screen() == DisplayScreen::POLARITY_SETTINGS) {
         if (semicolon && !wasSemicolon) { model.setPolarityReversed(false); DisplayTask::requestRender(); }
         if (period    && !wasPeriod)     { model.setPolarityReversed(true);  DisplayTask::requestRender(); }
+        model.setOverlayStartMillis(millis());
+    }
+    // In WABUN settings: ; = forward cycle, . = backward cycle.
+    else if (model.screen() == DisplayScreen::WABUN_SETTINGS) {
+        if (semicolon && !wasSemicolon) {
+            MorseTableMode cur = model.morseTableMode();
+            int next = ((int)cur + 1) % 3;
+            model.setMorseTableMode(static_cast<MorseTableMode>(next));
+            DisplayTask::requestRender();
+        }
+        if (period && !wasPeriod) {
+            MorseTableMode cur = model.morseTableMode();
+            int prev = ((int)cur + 2) % 3;
+            model.setMorseTableMode(static_cast<MorseTableMode>(prev));
+            DisplayTask::requestRender();
+        }
         model.setOverlayStartMillis(millis());
     }
     // Wi-Fi screens: dedicated handlers. Each screen has its own edge
@@ -1181,6 +1212,13 @@ static void handleKeyboard() {
             prefs.end();
             Log::write("[KB] saved polarity=%s\n", model.polarityReversed() ? "reversed" : "normal");
         }
+        if (model.screen() == DisplayScreen::WABUN_SETTINGS) {
+            Preferences prefs;
+            prefs.begin("morse", false);  // read-write
+            prefs.putInt("wabun", (int)model.morseTableMode());
+            prefs.end();
+            Log::write("[KB] saved wabunMode=%d\n", (int)model.morseTableMode());
+        }
         if (model.screen() != DisplayScreen::DECODER) {
             model.setScreen(DisplayScreen::DECODER);
             DisplayTask::requestRender();
@@ -1200,6 +1238,7 @@ static void handleKeyboard() {
     wasW = wKey; wasF = fKey; wasV = vKey; wasM = mKey; wasK = kKey; wasShift = shift;
     wasSemicolon = semicolon; wasPeriod = period;
     wasS = sKey;
+    wasJ = jKey;
     // wasC/wasN are tracked where they are used (above).
 #else
     (void)0;
@@ -1283,6 +1322,7 @@ void setup() {
         String savedKeyType = prefs.getString("keytype", "paddle");
         bool savedKeying = prefs.getBool("keying", false);
         bool savedPolarity = prefs.getBool("polarity", false);
+        int savedWabun = prefs.getInt("wabun", 0);
         prefs.end();
         model.setWPM(savedWpm);
         model.setFrequency((float)savedFreq);
@@ -1294,6 +1334,9 @@ void setup() {
         // Paddle polarity — forwarded to the iambic keyer, which AudioEngine
         // has already constructed by this point. Default is Normal.
         model.setPolarityReversed(savedPolarity);
+        if (savedWabun >= 0 && savedWabun <= 2) {
+            model.setMorseTableMode(static_cast<MorseTableMode>(savedWabun));
+        }
         Log::write("[setup] loaded WPM=%d freq=%d vol=%d keytype=%s keying=%d polarity=%s from preferences\n",
             savedWpm, savedFreq, savedVol, savedKeyType.c_str(), savedKeying ? 1 : 0,
             savedPolarity ? "reversed" : "normal");

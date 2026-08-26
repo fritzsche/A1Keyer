@@ -8,7 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-_(none)_
+- **Wabun code (Japanese Morse) support.** Press `J` to cycle between
+  International, Wabun (Katakana), and Wabun (Hiragana) modes. The
+  decoder renders Japanese kana on the Cardputer display using the
+  built-in IPA Gothic 12 pt font from M5GFX. The web UI has a Wabun
+  mode selector. Mode is persisted in NVS. See `docs/wabun.md`.
+- **Japanese font for the Cardputer.** The firmware links the IPA
+  Gothic 12 pt font (~109 KB) from M5GFX when Wabun mode is active,
+  enabling display of UTF-8 katakana/hiragana on the 240×135 LCD.
+- **`/state` now exposes `wabunMode` (0–2).**
+- **`/api/settings` accepts `"wabunMode"`** (integer 0–2).
 
 ## [0.5.0] - 2026-08-24
 

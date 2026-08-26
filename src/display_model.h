@@ -22,6 +22,7 @@
 
 #include "net_config.h"
 #include "memory_store.h"
+#include "MorseTable.h"
 
 class TextInput;   // forward: passwordInput() returns TextInput*
 
@@ -47,7 +48,9 @@ enum class DisplayScreen {
     WIFI_NETWORK_INFO_CONFIRM, ///< Network config: Y/N confirmation overlay for "forget network".
 
     MEMORY_PICK,         ///< Memory keyer: M opened, awaiting digit 0-9 to choose the slot to edit.
-    MEMORY_EDIT          ///< Memory keyer: slot picked, editing CW text via TextInput (same control as the Wi-Fi password screen).
+    MEMORY_EDIT,         ///< Memory keyer: slot picked, editing CW text via TextInput (same control as the Wi-Fi password screen).
+
+    WABUN_SETTINGS       ///< Wabun mode selection: International / Wabun Katakana / Wabun Hiragana.
 };
 
 /** Keyer operating mode. */
@@ -190,6 +193,11 @@ public:
 
     /** Set the WinKey/Console mode indicator (mirror of Console::mode()). */
     void setWinkeyMode(bool on);
+
+    // ─── Morse table mode ───────────────────────────────────────────────────
+
+    MorseTableMode morseTableMode() const;
+    void setMorseTableMode(MorseTableMode mode);
 
     // ─── Decoded text (circular buffer) ────────────────────────────────────
     // The circular buffer holds TEXT_BUF_SIZE (200) characters of decoded morse.
@@ -720,6 +728,9 @@ private:
     // device starts speaking the WK2 protocol to a host logger on cold
     // boot; operator toggles to Console/debug with the 'D' key).
     std::atomic<bool> _winkeyMode{true};
+
+    // Morse table mode: 0=International, 1=Wabun Katakana, 2=Wabun Hiragana
+    std::atomic<MorseTableMode> _morseTableMode{MorseTableMode::INTERNATIONAL};
 
     // Keyer pattern percentage — written by audio thread
     std::atomic<int> _keyerPct{0};
