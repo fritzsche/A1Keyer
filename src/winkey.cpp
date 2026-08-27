@@ -17,6 +17,7 @@
 #include "audio_engine.h"
 #include "morse_generator.h"
 #include "morse_decoder.h"
+#include "tx_buffer.h"
 #include "Log.h"
 
 namespace {
@@ -101,18 +102,61 @@ bool cbCanAcceptText(void* /*ctx*/) {
     return gen && !gen->isPlaying();
 }
 
+// ─── TX-buffer side-band callbacks (A1Keyer vendor extension) ──────────────
+//
+// Wired to the bridge when the host enters LOAD mode (ADMIN_TX_BUFFER_LOAD)
+// and dispatches bytes/control codes to MorseModel::_txBuffer — the same
+// buffer the web UI's /api/tx/* endpoints drive. See docs/tx_buffer.md § 5.
+
+void cbTxBufferFeed(char c, void* /*ctx*/) {
+    MorseModel::instance().appendTxChar(c);
+}
+
+void cbTxBufferBackspace(void* /*ctx*/) {
+    MorseModel::instance().backspaceTx();
+}
+
+void cbTxBufferClear(void* /*ctx*/) {
+    // Cancels any in-flight session and wipes the buffer.
+    MorseModel::instance().clearTx();
+}
+
+void cbTxBufferLoad(void* /*ctx*/) {
+    // The bridge just flipped _txBufferLoadMode=true. Discard any
+    // stale live bytes that arrived before the mode switch — the
+    // host has explicitly opted into LOAD mode and any pending live
+    // bytes represent stale intent. The MorseModel buffer is
+    // preserved (the host may want to append to it).
+    Log::info("[WK] TX-buffer LOAD mode entered");
+}
+
+void cbTxBufferStart(void* /*ctx*/) {
+    Log::info("[WK] TX-buffer START (host-driven)");
+    TxBuffer::beginSession();
+}
+
+bool cbTxBufferHasPending(void* /*ctx*/) {
+    return MorseModel::instance().txHasPending();
+}
+
 }  // namespace
 
 void Winkey::begin() {
     WinkeySerial::begin();
     WinkeyBridge::Callbacks cb;
-    cb.setWpm          = &cbSetWpm;
-    cb.setSidetoneHz   = &cbSetSidetoneHz;
-    cb.setOutputEnable = &cbSetOutputEnable;
-    cb.sendText        = &cbSendText;
-    cb.canAcceptText   = &cbCanAcceptText;
-    cb.stopSending     = &cbStopSending;
-    cb.ctx             = nullptr;
+    cb.setWpm              = &cbSetWpm;
+    cb.setSidetoneHz       = &cbSetSidetoneHz;
+    cb.setOutputEnable     = &cbSetOutputEnable;
+    cb.sendText            = &cbSendText;
+    cb.canAcceptText       = &cbCanAcceptText;
+    cb.stopSending         = &cbStopSending;
+    cb.txBufferFeed        = &cbTxBufferFeed;
+    cb.txBufferBackspace   = &cbTxBufferBackspace;
+    cb.txBufferClear       = &cbTxBufferClear;
+    cb.txBufferLoad        = &cbTxBufferLoad;
+    cb.txBufferStart       = &cbTxBufferStart;
+    cb.txBufferHasPending  = &cbTxBufferHasPending;
+    cb.ctx                 = nullptr;
     _bridge.begin(&wkOut, nullptr, cb);
     // Forward MorseDecoder's decoded characters back to the host so
     // RUMlogNG / N1MM log the operator's paddle keying. Mirrors K3NG's
@@ -207,12 +251,22 @@ const WinkeyBridge* Winkey::bridge() {
     return &_bridge;
 }
 
+// TX-buffer session entry. Both the HTTP /api/tx/start handler and the
+// WinKeyBridge cbTxBufferStart callback eventually call MorseModel::
+// startTx() directly — this method is a public hook reserved for future
+// callers (e.g. an on-device keyboard overlay). Keeping the API on
+// Winkey mirrors the playLocalMemoryText shape.
+void Winkey::beginTxSession() {
+    MorseModel::instance().startTx();
+}
+
 #else  // UNIT_TEST — no-op stubs
 
 void Winkey::begin() {}
 void Winkey::poll() {}
 void Winkey::syncWpmFromLocal() {}
 void Winkey::playLocalMemoryText(const char*) {}
+void Winkey::beginTxSession() {}
 const WinkeyBridge* Winkey::bridge() { return nullptr; }
 
 #endif  // UNIT_TEST

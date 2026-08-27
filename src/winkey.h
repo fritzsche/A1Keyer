@@ -49,6 +49,15 @@ public:
     /// See docs/memory.md and docs/winkey.md.
     static void playLocalMemoryText(const char* text);
 
+    /// TX-buffer entry point. Replaces the memory-keyer path with
+    /// the shared MorseModel::_txBuffer for callers that want to
+    /// drive the TX buffer directly (currently the HTTP handler and
+    /// the WinKeyBridge admin callbacks — neither calls this; both
+    /// go via MorseModel directly). Provided as a public hook so
+    /// future entry points (e.g. an on-device keyboard overlay) can
+    /// share the same path. No-op in UNIT_TEST builds.
+    static void beginTxSession();
+
 private:
     Winkey() = delete;
 };

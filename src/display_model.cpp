@@ -137,6 +137,16 @@ void MorseModel::appendDecodedChar(char c, bool fromPlayer) {
         if (prevHead == SIZE_MAX) {
             _playerHead.store(head, std::memory_order_relaxed);
         }
+        // TX-buffer sync: when a player char lands in the decoded text
+        // during an active TX session, advance _txSent by 1 and update
+        // _txHead to the char just keyed (the caret visual). This is
+        // what eventually flips txActive=false at session completion.
+        // The atomic incrementChangeCounter at the bottom already
+        // notifies the web UI via /state polling.
+        if (_txActive.load(std::memory_order_relaxed)) {
+            _txSent.fetch_add(1, std::memory_order_relaxed);
+            _txHead.fetch_add(1, std::memory_order_relaxed);
+        }
     } else {
         _lastCharFromPlayer.store(false, std::memory_order_relaxed);
         _playerHead.store(SIZE_MAX, std::memory_order_relaxed);
@@ -501,5 +511,151 @@ void MorseModel::copyMemoryBank(const MemoryBank& bank) {
     for (uint8_t i = 0; i < kMemSlots; ++i) {
         memCopyStr(_memory[i], kMemLen, bank.slot[i]);
     }
+    incrementChangeCounter();
+}
+
+// ─── TX-buffer accessors ─────────────────────────────────────────────────────
+//
+// Session-only text compose + transmit buffer. Shared between the web UI
+// (HTTP /api/tx/*) and the WinKey host interface (ADMIN_TX_BUFFER_LOAD +
+// ADMIN_TX_BUFFER_START). Single source of truth lives in _txBuffer; the
+// TxBuffer::poll() driver feeds chunks from it into MorseGenerator.
+//
+// Edit boundary (txEditableStart):
+//   - No chunk in flight → txSent (everything not yet keyed is editable).
+//   - Chunk in flight   → txChunkStart + txChunkLen (the entire chunk is
+//     locked once pushed to the generator; only chars after the chunk
+//     are editable). This means: even when the LAST chunk is being keyed,
+//     the operator can still append to the pending tail — that scenario
+//     becomes a new chunk and plays once the current one drains. Matches
+//     the "TX already close, append a small fix" use case from the brief.
+
+namespace {
+// Helper: copy `src` into the TX buffer at position 0, truncating at
+// kTxBufLen-1 chars. Always NUL-terminates.
+size_t copyIntoTxBuf(char* dst, size_t cap, const char* src) {
+    if (!src) {
+        dst[0] = '\0';
+        return 0;
+    }
+    size_t n = 0;
+    while (n + 1 < cap && src[n] != '\0') {
+        dst[n] = src[n];
+        ++n;
+    }
+    dst[n] = '\0';
+    return n;
+}
+}  // namespace
+
+void MorseModel::setTxText(const char* text) {
+    // Full-buffer replace. Resets txSent=0, clears txActive, stops the
+    // generator if running. Always NUL-terminates.
+    size_t n = copyIntoTxBuf(_txBuffer, kTxBufLen, text);
+    _txLen.store(n, std::memory_order_relaxed);
+    _txSent.store(0, std::memory_order_relaxed);
+    _txHead.store(0, std::memory_order_relaxed);
+    _txChunkStart.store(0, std::memory_order_relaxed);
+    _txChunkLen.store(0, std::memory_order_relaxed);
+#ifndef UNIT_TEST
+    // Stop the generator if a session was in progress.
+    if (auto gen = AudioEngine::morseGen()) {
+        gen->stop();
+    }
+#endif
+    _txActive.store(false, std::memory_order_relaxed);
+    incrementChangeCounter();
+}
+
+bool MorseModel::appendTxChar(char c) {
+    size_t len = _txLen.load(std::memory_order_relaxed);
+    if (len + 1 >= kTxBufLen) {
+        // Cap-exceeded (need room for the terminator). Silent reject.
+        return false;
+    }
+    _txBuffer[len] = c;
+    _txBuffer[len + 1] = '\0';
+    _txLen.store(len + 1, std::memory_order_relaxed);
+    incrementChangeCounter();
+    return true;
+}
+
+bool MorseModel::backspaceTx() {
+    size_t len = _txLen.load(std::memory_order_relaxed);
+    size_t editStart = txEditableStart();
+    if (len <= editStart) {
+        return false;
+    }
+    _txBuffer[len - 1] = '\0';
+    _txLen.store(len - 1, std::memory_order_relaxed);
+    incrementChangeCounter();
+    return true;
+}
+
+void MorseModel::clearTx() {
+    _txBuffer[0] = '\0';
+    _txLen.store(0, std::memory_order_relaxed);
+    _txSent.store(0, std::memory_order_relaxed);
+    _txHead.store(0, std::memory_order_relaxed);
+    _txChunkStart.store(0, std::memory_order_relaxed);
+    _txChunkLen.store(0, std::memory_order_relaxed);
+#ifndef UNIT_TEST
+    if (auto gen = AudioEngine::morseGen()) {
+        gen->stop();
+    }
+#endif
+    _txActive.store(false, std::memory_order_relaxed);
+    incrementChangeCounter();
+}
+
+void MorseModel::startTx() {
+    // Idempotent. No-op if already active or nothing to send.
+    if (_txActive.load(std::memory_order_relaxed)) return;
+    size_t len = _txLen.load(std::memory_order_relaxed);
+    size_t sent = _txSent.load(std::memory_order_relaxed);
+    if (len <= sent) return;
+    _txActive.store(true, std::memory_order_relaxed);
+    _txHead.store(sent, std::memory_order_relaxed);
+    incrementChangeCounter();
+}
+
+void MorseModel::stopTx() {
+    // Cancel in-flight chunk + clear _txActive. Pending text preserved.
+#ifndef UNIT_TEST
+    if (auto gen = AudioEngine::morseGen()) {
+        gen->stop();
+    }
+#endif
+    _txChunkStart.store(0, std::memory_order_relaxed);
+    _txChunkLen.store(0, std::memory_order_relaxed);
+    _txActive.store(false, std::memory_order_relaxed);
+    _txHead.store(_txSent.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    incrementChangeCounter();
+}
+
+void MorseModel::bumpTxSentBy(size_t n) {
+    if (n == 0) return;
+    _txSent.fetch_add(n, std::memory_order_relaxed);
+    _txChunkStart.store(_txSent.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    _txChunkLen.store(0, std::memory_order_relaxed);
+    _txHead.store(_txSent.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    incrementChangeCounter();
+}
+
+void MorseModel::setTxChunk(size_t start, size_t len) {
+    _txChunkStart.store(start, std::memory_order_relaxed);
+    _txChunkLen.store(len, std::memory_order_relaxed);
+    incrementChangeCounter();
+}
+
+void MorseModel::setTxHead(size_t head) {
+    _txHead.store(head, std::memory_order_relaxed);
+}
+
+void MorseModel::clearTxActive() {
+    _txActive.store(false, std::memory_order_relaxed);
+    _txChunkStart.store(0, std::memory_order_relaxed);
+    _txChunkLen.store(0, std::memory_order_relaxed);
+    _txHead.store(_txSent.load(std::memory_order_relaxed), std::memory_order_relaxed);
     incrementChangeCounter();
 }

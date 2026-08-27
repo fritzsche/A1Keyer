@@ -1503,8 +1503,6 @@ gap to be picked up later.
 
 ## 17. Test strategy and the host-side test utility
 
-### 17.1 Firmware unit tests
-
 New test suite `test/test_winkey_bridge/` follows the pattern of
 `test/test_radio_keyer/`. Uses `test/test_framework.h` macros (`CHECK`,
 `CHECK_EQ`, `RUN`).
@@ -1626,6 +1624,62 @@ bench:
    chip drops the excess and sets the BUSY-OVFL status bit. A1Keyer's
    `WinkeyBuffer` will use a ring buffer sized to match; overflow
    drops bytes and sets the bit.
+
+---
+
+## 19. TX-buffer extensions (A1Keyer vendor extension)
+
+The A1Keyer bridge exposes three admin sub-commands (0x0C, 0x0D,
+0x0E) and one status bit (bit 4) that let a WK2 host drive the
+shared TX buffer — the same buffer the web UI's TX buffer card
+exposes. See `docs/tx_buffer.md` for the operator-facing reference;
+this section is the byte-level protocol contract.
+
+### 19.1 Admin sub-commands
+
+| Sub-command | Value | Effect |
+|---|---|---|
+| `ADMIN_TX_BUFFER_LOAD` | `0x00 0x0C` | Enter LOAD mode. Future text bytes (≥ 0x20) accumulate in `MorseModel::_txBuffer`. WK 0x08 (backspace) and 0x0A (clear) target the TX buffer in this mode. Idempotent. |
+| `ADMIN_TX_BUFFER_START` | `0x00 0x0D` | Exit LOAD mode and begin playback of the accumulated TX buffer. Idempotent (no-op if LOAD mode wasn't set, or if a session is already active). |
+| `ADMIN_TX_BUFFER_CLEAR` | `0x00 0x0E` | Wipe `MorseModel::_txBuffer` regardless of LOAD mode. |
+
+Live-stream mode is unchanged. Hosts that don't issue
+`ADMIN_TX_BUFFER_LOAD` see bytes flow through `WinkeyBuffer` and key
+immediately as today.
+
+### 19.2 Status bit
+
+WK2 status byte **bit 4** (`0x10`) reports "TX buffer has unsent
+chars". Set when `MorseModel::txLen() > txSent()` and
+`_cb.txBufferHasPending()` returns true. The host polls via
+`WK_REQ_STATUS (0x15)` and checks bit 4.
+
+K1EL WK2 § 12.2 reserves bit 4 for the "WAIT" flag (combined with
+XOFF on bit 0 when the live buffer hits 2/3 capacity). A1Keyer's
+TX-buffer bit 4 is a vendor extension that overrides the WAIT bit
+in the non-WAIT+XOFF context. Hosts that decode WAIT as
+`bit 4 && bit 0` are unaffected; hosts that decode WAIT as `bit 4`
+alone will see a false positive on this extension. The bridge's
+existing WAIT+XOFF combination for the live buffer is preserved
+verbatim.
+
+### 19.3 Backwards compatibility
+
+Hosts that don't decode the new sub-commands see them as
+accept-and-ignored admin sub-commands (the bridge's `handleAdmin`
+default branch is accept-and-ignore). The new status bit is also
+ignored by hosts that don't decode it. No regression risk for
+existing WK2 hosts (RUMlogNG, N1MM, fldigi, WriteLog).
+
+### 19.4 Reference implementation
+
+- `src/winkey_bridge.cpp::handleAdmin()` — the three sub-command cases.
+- `src/winkey_bridge.cpp::appendText()`, `applyCommand(WK_BACKSPACE)`,
+  `applyCommand(WK_CLEAR_BUF)` — branch on `_txBufferLoadMode`.
+- `src/winkey_bridge.cpp::statusByte()` — sets bit 4.
+- `src/winkey.cpp::cbTxBufferFeed` et al. — device-side glue that
+  routes the bridge's TX-buffer operations to `MorseModel`.
+- `docs/tx_buffer.md` — operator reference and full design.
 
 ---
 

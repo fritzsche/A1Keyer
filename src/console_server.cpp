@@ -118,6 +118,20 @@ void handleState() {
 
     body += ",\"decoded\":\"";       jsonEscape(body, decoded.c_str()); body += '"';
 
+    // TX buffer (shared with the WinKey host via ADMIN_TX_BUFFER_LOAD).
+    // Session-only — wiped on reboot. The web UI polls /state and
+    // renders the three regions (sent / in-flight / pending) from
+    // these fields. See docs/tx_buffer.md § 4.
+    body += ",\"txBuffer\":\"";
+    jsonEscape(body, m.txBuffer());
+    body += '"';
+    body += ",\"txLen\":";           body += m.txLen();
+    body += ",\"txSent\":";          body += m.txSent();
+    body += ",\"txHead\":";          body += m.txHead();
+    body += ",\"txChunkStart\":";    body += m.txChunkStart();
+    body += ",\"txChunkLen\":";      body += m.txChunkLen();
+    body += ",\"txActive\":";        body += m.txActive() ? "true" : "false";
+
     // Memory bank: all 10 slots, JSON-escaped, oldest to newest.
     body += ",\"memory\":[";
     for (uint8_t i = 0; i < kMemSlots; ++i) {

@@ -23,6 +23,7 @@
 #include "key_event_bus.h"
 #include "radio_keyer.h"
 #include "winkey.h"
+#include "tx_buffer.h"
 #include "console_io.h"
 #include "network_manager.h"
 #include "text_input.h"
@@ -1448,6 +1449,12 @@ void loop() {
 
     // Service the WinKeyer stream (host logger → keying), only in WinKey mode.
     Winkey::poll();
+
+    // Drive the shared TX-buffer playback. Independent of WinKey mode —
+    // the buffer can be armed by the web UI even when no host is
+    // attached. Cheap on idle ticks: a single atomic load returns false
+    // and the function returns.
+    TxBuffer::poll();
 
 #ifdef BOARD_CARDPUTER
     // Update headphone state

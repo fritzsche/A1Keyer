@@ -18,6 +18,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enabling display of UTF-8 katakana/hiragana on the 240×135 LCD.
 - **`/state` now exposes `wabunMode` (0–2).**
 - **`/api/settings` accepts `"wabunMode"`** (integer 0–2).
+- **Web TX buffer — type-and-send free-form CW from any browser.**
+  A new TX buffer card between Live decode and Settings allows the
+  operator to type a message, click TX, and watch three-colour progress
+  (sent=grey, in-flight=accent, pending=editable). Edits to the pending
+  tail are allowed even while the last chunk is being keyed. Auto-RX
+  on completion. Session-only (no NVS). See `docs/tx_buffer.md`.
+- **WinKey-driven TX buffer — shared buffer with the web UI.**
+  Three new admin sub-commands (`ADMIN_TX_BUFFER_LOAD` 0x0C,
+  `ADMIN_TX_BUFFER_START` 0x0D, `ADMIN_TX_BUFFER_CLEAR` 0x0E) let a
+  WK2 host stream text into the same `MorseModel::_txBuffer` the web
+  UI uses. WK2 status byte bit 4 reports buffer non-empty. Live-stream
+  mode (the default) is unchanged. See `docs/winkey.md` §19.
 
 ## [0.5.0] - 2026-08-24
 

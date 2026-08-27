@@ -56,17 +56,27 @@ enum : uint8_t {
 
 // Admin sub-commands (after 0x00).
 enum : uint8_t {
-    ADMIN_RESET      = 0x01,
-    ADMIN_HOST_OPEN  = 0x02,
-    ADMIN_HOST_CLOSE = 0x03,
-    ADMIN_GET_VALUES = 0x07,   // K1EL WK2 datasheet v23 § 4 — reply with all
-                                // current settings; the byte value (0x07) is
-                                // in the same numeric range as operating
-                                // WK_GET_POT, but the 0x00 prefix routes it
-                                // here instead — no collision. See
-                                // docs/winkey.md § 16.7.
-    ADMIN_SET_WK1    = 0x0A,
-    ADMIN_SET_WK2    = 0x0B,
+    ADMIN_RESET             = 0x01,
+    ADMIN_HOST_OPEN         = 0x02,
+    ADMIN_HOST_CLOSE        = 0x03,
+    ADMIN_GET_VALUES        = 0x07,   // K1EL WK2 datasheet v23 § 4 — reply with all
+                                      // current settings; the byte value (0x07) is
+                                      // in the same numeric range as operating
+                                      // WK_GET_POT, but the 0x00 prefix routes it
+                                      // here instead — no collision. See
+                                      // docs/winkey.md § 16.7.
+    ADMIN_SET_WK1           = 0x0A,
+    ADMIN_SET_WK2           = 0x0B,
+    // A1Keyer vendor extensions — sub-commands 0x0C..0x0E expose a
+    // shared TX-buffer mode (same buffer the web UI's /api/tx/*
+    // endpoints drive). K1EL WK2 datasheet reserves 0x00-0x0F for
+    // admin, so these are within spec. Hosts that don't know about
+    // them see them as silently-accepted admin sub-commands (the
+    // bridge's handleAdmin default branch is accept-and-ignore). See
+    // docs/winkey.md § 17 and docs/tx_buffer.md § 5.
+    ADMIN_TX_BUFFER_LOAD    = 0x0C,
+    ADMIN_TX_BUFFER_START   = 0x0D,
+    ADMIN_TX_BUFFER_CLEAR   = 0x0E,
 };
 
 constexpr uint8_t kTextThreshold = 0x20;  // >= this byte value is text
@@ -183,6 +193,10 @@ void WinkeyBridge::resetParams() {
     _prevConsumerBusy    = false;
     _sawAudioEndEdge     = false;
     _prevBufferNonEmpty  = false;
+    // Drop LOAD mode on any reset. The host has to re-issue
+    // ADMIN_TX_BUFFER_LOAD to re-enter. Safe for both the test-only
+    // resetForTest() path and the wire-facing admin reset.
+    _txBufferLoadMode = false;
 }
 
 void WinkeyBridge::emit(uint8_t byte) {
@@ -278,6 +292,18 @@ void WinkeyBridge::appendText(uint8_t byte) {
     // Uppercase lowercase letters (WK behaviour). '|' (0x7C) is a
     // half-space; pass it through — the generator treats it as text.
     if (byte >= 'a' && byte <= 'z') byte = (uint8_t)(byte - 32);
+    // TX-buffer LOAD mode: route the byte to the shared TX buffer
+    // (MorseModel::_txBuffer, same buffer the web UI writes to). The
+    // callback is the device-side glue in winkey.cpp; nullptr in
+    // host unit tests means the byte is silently dropped (LOAD mode
+    // is then a no-op sink — useful for testing the wiring without
+    // pulling in MorseModel). The byte is echoed either way so the
+    // host sees what was appended.
+    if (_txBufferLoadMode) {
+        if (_cb.txBufferFeed) _cb.txBufferFeed((char)byte, _cb.ctx);
+        emit(byte);
+        return;
+    }
     _buffer.push((char)byte);
     // Echo the byte back to the host IMMEDIATELY, not later when the
     // buffer is drained for keying. This matches the K1EL WK2 chip:
@@ -331,6 +357,33 @@ void WinkeyBridge::handleAdmin(uint8_t sub) {
             for (uint8_t b : reply) emit(b);
             return;
         }
+        case ADMIN_TX_BUFFER_LOAD:
+            // Enter LOAD mode. Future text bytes / 0x08 / 0x0A route
+            // to MorseModel::_txBuffer instead of the live WinkeyBuffer.
+            // The device-side glue (`_cb.txBufferLoad`) is responsible
+            // for any state-bookkeeping on entry — typically it flushes
+            // any stale live bytes and arms the TX session plumbing.
+            // Idempotent: re-entering LOAD mode is a no-op.
+            if (_txBufferLoadMode) return;
+            _txBufferLoadMode = true;
+            if (_cb.txBufferLoad) _cb.txBufferLoad(_cb.ctx);
+            return;
+        case ADMIN_TX_BUFFER_START:
+            // Exit LOAD mode and start playback of the accumulated
+            // text. The device glue calls TxBuffer::beginSession(),
+            // which arms the MorseModel flag and sets the chunk
+            // boundary. Idempotent: re-issuing while a session is
+            // already running is a no-op (the device glue returns
+            // early if _txActive is true).
+            if (!_txBufferLoadMode) return;
+            _txBufferLoadMode = false;
+            if (_cb.txBufferStart) _cb.txBufferStart(_cb.ctx);
+            return;
+        case ADMIN_TX_BUFFER_CLEAR:
+            // Wipe the TX buffer (works in BOTH load and live mode —
+            // useful for the host to reset state without exiting LOAD).
+            if (_cb.txBufferClear) _cb.txBufferClear(_cb.ctx);
+            return;
         default:
             // Calibrate, A2D, other get-values, EEPROM, baud: accepted-and-
             // ignored in the core subset (§ 16.6). Note: some of these
@@ -366,9 +419,17 @@ void WinkeyBridge::applyCommand(uint8_t cmd, const uint8_t* p, uint8_t n) {
             return;
         }
         case WK_BACKSPACE:
+            if (_txBufferLoadMode) {
+                if (_cb.txBufferBackspace) _cb.txBufferBackspace(_cb.ctx);
+                return;
+            }
             _buffer.backspace();
             return;
         case WK_CLEAR_BUF:
+            if (_txBufferLoadMode) {
+                if (_cb.txBufferClear) _cb.txBufferClear(_cb.ctx);
+                return;
+            }
             _buffer.clear();
             // CLEAR_BUF is the host-driven "drop everything, we're
             // done with this session" signal. The next bytes that
@@ -574,5 +635,16 @@ uint8_t WinkeyBridge::statusByte() const {
     uint8_t s = 0xC0;
     if (_buffer.xoff())  s |= 0x11;   // WAIT (bit4) + XOFF (bit0)
     if (!_buffer.empty()) s |= 0x04;  // BUSY (bit2) — chars pending
+    // A1Keyer vendor extension: bit 4 (currently undefined in K1EL
+    // WK2 § 12.2) reports TX-buffer-non-empty. Bit 4 is repurposed
+    // here; K1EL documents bit 4 as "WAIT" but only in combination
+    // with XOFF (bit 0) when the live send buffer hits its 2/3 mark
+    // — see the WAIT+XOFF line above. Hosts that don't decode this
+    // bit see no change. Set when the shared TX buffer has unsent
+    // chars, regardless of whether the WK2 session is in LOAD mode
+    // (the web UI can also leave the buffer non-empty).
+    if (_cb.txBufferHasPending && _cb.txBufferHasPending(_cb.ctx)) {
+        s |= 0x10;
+    }
     return s;
 }

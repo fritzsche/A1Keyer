@@ -687,6 +687,97 @@ public:
     /// Used by setup() (load) and on Enter (save).
     void copyMemoryBank(const MemoryBank& bank);
 
+    // ─── TX-buffer state ──────────────────────────────────────────────────────
+    //
+    // Single source of truth for the operator-facing text compose + transmit
+    // buffer. Shared between the web UI (HTTP /api/tx/*) and the WinKey host
+    // interface (ADMIN_TX_BUFFER_LOAD/START/CLEAR). Session-only — NOT
+    // persisted to NVS, cleared on reboot. See docs/tx_buffer.md.
+
+    /// Buffer capacity, including the terminator. Max usable length is
+    /// kTxBufLen - 1 = 255 chars (matches the web UI's maxlength).
+    static constexpr size_t kTxBufLen = 256;
+
+    /// Pointer to the NUL-terminated buffer text. Never null; an empty
+    /// buffer returns "". Stable pointer for the lifetime of the model.
+    const char* txBuffer() const { return _txBuffer; }
+
+    /// Current length of buffer[0..txLen-1]. 0..kTxBufLen-1.
+    size_t txLen() const { return _txLen.load(std::memory_order_relaxed); }
+
+    /// Count of chars whose marks have completed (i.e. were appended to
+    /// the decoded text with fromPlayer=true during a TX session).
+    /// Monotonic during a single session — operator edits can only grow
+    /// _txLen past _txSent, never shrink it.
+    size_t txSent() const { return _txSent.load(std::memory_order_relaxed); }
+
+    /// Char index currently being keyed (best-effort visual for the caret).
+    /// Always >= txSent() while a chunk is in flight; equals txSent() otherwise.
+    size_t txHead() const { return _txHead.load(std::memory_order_relaxed); }
+
+    /// True while a TX session is feeding the MorseGenerator.
+    bool txActive() const { return _txActive.load(std::memory_order_relaxed); }
+
+    /// Buffer index where the currently-playing chunk begins (== txSent()
+    /// when no chunk is in flight).
+    size_t txChunkStart() const { return _txChunkStart.load(std::memory_order_relaxed); }
+
+    /// Length of the currently-playing chunk (0 when idle).
+    size_t txChunkLen() const { return _txChunkLen.load(std::memory_order_relaxed); }
+
+    /// First buffer index that is currently EDITABLE.
+    ///   - No chunk in flight → txSent() (everything not yet keyed is editable).
+    ///   - Chunk in flight   → txChunkStart() + txChunkLen() (the entire
+    ///                        chunk is locked once it's been pushed to
+    ///                        the generator — the operator can only edit
+    ///                        chars that come AFTER the current chunk).
+    size_t txEditableStart() const {
+        size_t cl = _txChunkLen.load(std::memory_order_relaxed);
+        if (cl > 0) {
+            return _txChunkStart.load(std::memory_order_relaxed) + cl;
+        }
+        return _txSent.load(std::memory_order_relaxed);
+    }
+
+    /// True iff there are unsent chars waiting to be keyed.
+    bool txHasPending() const {
+        return txLen() > txSent();
+    }
+
+    /// Replace the entire buffer with `text`, truncating at kTxBufLen-1.
+    /// Resets txSent=0, clears txActive, stops the generator if running.
+    /// Always NUL-terminates.
+    void setTxText(const char* text);
+
+    /// Append one char at the end of the buffer. Returns false on cap-exceeded.
+    /// Always allowed (the cursor is at the end by construction).
+    bool appendTxChar(char c);
+
+    /// Remove the last char. No-op unless txLen() > txEditableStart().
+    /// Returns true if a char was removed.
+    bool backspaceTx();
+
+    /// Wipe the buffer + counters + cancel any in-flight session.
+    void clearTx();
+
+    /// Arm the TX session (no-op if already active or nothing to send).
+    /// Idempotent.
+    void startTx();
+
+    /// Cancel any in-flight chunk + clear txActive. Pending text preserved.
+    void stopTx();
+
+    /// @name Internal — called by TxBuffer::poll() and the
+    ///                   appendDecodedChar(fromPlayer=true) path to keep
+    ///                   _txSent / _txHead / _txChunk* in sync with the
+    ///                   generator. Not for general use.
+    /// @{
+    void bumpTxSentBy(size_t n);            // chunk drained
+    void setTxChunk(size_t start, size_t len);  // chunk pushed to gen
+    void setTxHead(size_t head);            // caret position
+    void clearTxActive();                   // session done
+    /// @}
+
     // ─── Private members ──────────────────────────────────────────────────────
 
 private:
@@ -780,6 +871,20 @@ private:
     TextInput* _memoryInput   = nullptr;   ///< lazy; constructed in memoryInput(), bound to _memoryEditorBuf
     std::atomic<int> _memoryEditingSlot{-1};
     std::atomic<int> _memoryPickSlot{-1};
+
+    // ─── TX-buffer storage ───────────────────────────────────────────────────
+    // Shared between the web UI and the WinKey host (ADMIN_TX_BUFFER_LOAD).
+    // Single-writer / multi-reader pattern: writers (HTTP handler, WinKey
+    // bridge) hold Core 0; readers (TxBuffer::poll, /state handler) also
+    // on Core 0; _txSent/_txHead atomic advance from Core 1's
+    // appendDecodedChar(fromPlayer=true) path. Session-only.
+    char _txBuffer[kTxBufLen] = {0};
+    std::atomic<size_t> _txLen{0};
+    std::atomic<size_t> _txSent{0};
+    std::atomic<size_t> _txHead{0};
+    std::atomic<bool>   _txActive{false};
+    std::atomic<size_t> _txChunkStart{0};
+    std::atomic<size_t> _txChunkLen{0};
 
     // Increment on ANY state change — display task re-renders when this changes
     std::atomic<uint32_t> _changeCounter{0};

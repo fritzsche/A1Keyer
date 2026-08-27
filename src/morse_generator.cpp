@@ -102,7 +102,7 @@ void MorseGenerator::playText(const char* text, bool isContinuation) {
     } else {
         _playText.clear();
     }
-    _charIdx = 0;
+    _charIdx.store(0, std::memory_order_relaxed);
     _elements = _encoder.encode(_playText.c_str());
 
     // Preserve inter-character silence across chunk boundaries.
@@ -219,22 +219,24 @@ void MorseGenerator::stop() {
 // Advance to the next element and set up its envelope/sample info
 // ---------------------------------------------------------------------------
 void MorseGenerator::advanceToNextElement() {
+    size_t dbgCi = _charIdx.load(std::memory_order_relaxed);
     Log::write("[MG] advanceToNext: elIdx=%zu size=%zu charIdx=%zu/%zu char='%c'(%d)\n",
         (unsigned)_elIdx, (unsigned)_elements.size(),
-        (unsigned)_charIdx, _playText.size(),
-        _charIdx < _playText.size() ? _playText[_charIdx] : '?',
-        (unsigned char)(_charIdx < _playText.size() ? _playText[_charIdx] : 0));
+        (unsigned)dbgCi, _playText.size(),
+        dbgCi < _playText.size() ? _playText[dbgCi] : '?',
+        (unsigned char)(dbgCi < _playText.size() ? _playText[dbgCi] : 0));
     if (_elIdx >= _elements.size()) {
         // All elements exhausted — append all remaining characters.
         // Every character that was played as a mark but had no trailing CHAR_SPACE
         // needs to be appended here. These are exactly the characters from
         // _charIdx onwards (each was advanced past but never had a CHAR_SPACE).
-        while (_charIdx < _playText.size()) {
-            char c = _playText[_charIdx];
+        while (_charIdx.load(std::memory_order_relaxed) < _playText.size()) {
+            size_t ci = _charIdx.load(std::memory_order_relaxed);
+            char c = _playText[ci];
             Log::write("[MG] boundary: appending char='%c' at idx=%zu\n",
-                (unsigned char)c >= 32 ? (unsigned char)c : '?', (unsigned)_charIdx);
+                (unsigned char)c >= 32 ? (unsigned char)c : '?', (unsigned)ci);
             MorseModel::instance().appendDecodedChar(c, true);
-            ++_charIdx;
+            _charIdx.store(ci + 1, std::memory_order_relaxed);
         }
         // Record whether the last element of THIS chunk was a
         // boundary silence (CHAR_SPACE or WORD_SPACE). The encoder
@@ -320,14 +322,16 @@ void MorseGenerator::advanceToNextElement() {
         // the subsequent CHAR_SPACE append would write ' ' instead of the
         // expected letter to the display — the user saw "CQ " (trailing
         // space) while the audio was keying the second C of "CQ CQ".
-        while (_charIdx < _playText.size() && _playText[_charIdx] == ' ') {
-            ++_charIdx;
+        while (_charIdx.load(std::memory_order_relaxed) < _playText.size()
+               && _playText[_charIdx.load(std::memory_order_relaxed)] == ' ') {
+            _charIdx.fetch_add(1, std::memory_order_relaxed);
         }
         // Always update _currentChar to the character whose mark we're playing.
         // This ensures the right char is captured at the boundary.
-        _currentChar = (_charIdx < _playText.size()) ? _playText[_charIdx] : '\0';
+        size_t ci = _charIdx.load(std::memory_order_relaxed);
+        _currentChar = (ci < _playText.size()) ? _playText[ci] : '\0';
         Log::write("[MG] mark: charIdx=%zu/%zu char='%c'(%d) elType=%d\n",
-            (unsigned)_charIdx, _playText.size(),
+            (unsigned)ci, _playText.size(),
             (unsigned char)_currentChar >= 32 ? (unsigned char)_currentChar : '?',
             (unsigned char)_currentChar,
             (int)elType);
@@ -366,14 +370,14 @@ void MorseGenerator::advanceToNextElement() {
             // skip-spaces loop sees the right _charIdx).
             const bool suppressAppend = _suppressNextSilenceAppend;
             _suppressNextSilenceAppend = false;
-            if (_playText[_charIdx] != '\0') {
+            if (_playText[_charIdx.load(std::memory_order_relaxed)] != '\0') {
                 if (!suppressAppend) {
                     // Letter finished — append to shared decoded text buffer
                     uint32_t now = millis();
                     Log::write("[MG] APPEND t=%u char='%c' playPos=%zu/%zu\n",
                         now,
                         (unsigned char)_currentChar >= 32 ? (unsigned char)_currentChar : '?',
-                        (unsigned)_charIdx, _playText.size());
+                        (unsigned)_charIdx.load(std::memory_order_relaxed), _playText.size());
                     MorseModel::instance().appendDecodedChar(_currentChar, true);
                     // For WORD_SPACE, append the inter-word space separator
                     // so the device / web UI display shows the gap during
@@ -395,7 +399,7 @@ void MorseGenerator::advanceToNextElement() {
                     //                              branch below.
                     if (el.type == MorseEncoder::Element::WORD_SPACE
                         && _currentChar != ' ') {
-                        size_t peek = _charIdx + 1;
+                        size_t peek = _charIdx.load(std::memory_order_relaxed) + 1;
                         while (peek < _playText.size() && _playText[peek] == ' ') {
                             ++peek;
                         }
@@ -405,8 +409,9 @@ void MorseGenerator::advanceToNextElement() {
                     }
                     // Advance past this silence element so subsequent
                     // CHAR_SPACEs know which char was just keyed.
-                    ++_charIdx;
-                    _currentChar = _playText[_charIdx];
+                    _charIdx.fetch_add(1, std::memory_order_relaxed);
+                    size_t ci2 = _charIdx.load(std::memory_order_relaxed);
+                    _currentChar = (ci2 < _playText.size()) ? _playText[ci2] : '\0';
                 }
                 // suppressAppend path (prepend): do NOT advance
                 // _charIdx or change _currentChar. The prepend's

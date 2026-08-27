@@ -61,6 +61,20 @@ public:
         // (nullptr) is "always accept" — backwards compatible.
         bool (*canAcceptText)(void* ctx)                 = nullptr;
         void (*stopSending)(void* ctx)                   = nullptr;   // 0x0A clear
+        // ─── TX-buffer side-band (A1Keyer vendor extension) ────────────────
+        // When txBufferLoadMode() is true, text bytes / 0x08 / 0x0A
+        // route here instead of the live WinkeyBuffer. The device
+        // glue implements these against MorseModel::_txBuffer.
+        // nullptr in host unit tests (LOAD mode is then a no-op sink).
+        void (*txBufferFeed)(char c, void* ctx)          = nullptr;   // text byte in LOAD mode
+        void (*txBufferBackspace)(void* ctx)             = nullptr;   // 0x08 in LOAD mode
+        void (*txBufferClear)(void* ctx)                 = nullptr;   // 0x0A in LOAD mode
+        void (*txBufferLoad)(void* ctx)                  = nullptr;   // ADMIN_TX_BUFFER_LOAD
+        void (*txBufferStart)(void* ctx)                 = nullptr;   // ADMIN_TX_BUFFER_START
+        // Query: does the TX buffer have unsent chars? Used to set bit
+        // 4 of the WK2 status byte so hosts can poll readiness. nullptr
+        // → bit 4 stays clear (live-stream-only behaviour).
+        bool (*txBufferHasPending)(void* ctx)            = nullptr;
         void* ctx                                        = nullptr;
     };
 
@@ -166,6 +180,25 @@ public:
     /// sink. See docs/winkey.md § 16.8.
     void emitDecodedChar(char c);
 
+    // ─── TX-buffer extensions (A1Keyer-specific) ─────────────────────────────
+    //
+    // Three new admin sub-commands expose a TX-buffer mode on the WK2
+    // interface. The shared buffer is MorseModel::_txBuffer (the same
+    // buffer the web UI's /api/tx/* endpoints drive). Live-stream mode
+    // is the default and is unchanged — hosts that don't know about
+    // these commands see no difference. See docs/tx_buffer.md § 5 and
+    // docs/winkey.md § 17.
+
+    /// True when text bytes (≥ 0x20) accumulate into MorseModel::_txBuffer
+    /// instead of the live WinkeyBuffer (which keys immediately). 0x08
+    /// (backspace) and 0x0A (clear) target the TX buffer in this mode.
+    bool txBufferLoadMode() const { return _txBufferLoadMode; }
+
+    /// Manually set the load mode. Called from the admin sub-command
+    /// handlers. Idempotent. The default constructor leaves it false.
+    /// `resetForTest()` / `resetParams()` also clear it.
+    void setTxBufferLoadMode(bool on) { _txBufferLoadMode = on; }
+
 private:
     // Parser state: are we mid-command awaiting parameter byte(s)?
     enum class Parse : uint8_t {
@@ -224,6 +257,13 @@ private:
 
     // CW send buffer (text >= 0x20 accumulates here, drains in poll()).
     WinkeyBuffer _buffer;
+
+    // TX-buffer mode flag (A1Keyer vendor extension). When true, text
+    // bytes / backspace / clear are routed to MorseModel::_txBuffer
+    // (the shared web UI TX buffer) instead of _buffer. Switched by
+    // ADMIN_TX_BUFFER_LOAD, exited by ADMIN_TX_BUFFER_START. Cleared
+    // by resetParams() and resetForTest(). See docs/tx_buffer.md § 5.
+    bool _txBufferLoadMode = false;
 
     // Chunked-playback continuation tracker. Set false at session
     // boundaries (resetParams, WK_CLEAR_BUF, busy→idle edge with

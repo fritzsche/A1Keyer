@@ -90,6 +90,15 @@ public:
      */
     char currentChar() const { return _currentChar; }
 
+    /**
+     * @return Index of the next character to play (0-based, into _playText).
+     * Returns 0 when idle. Best-effort: read with relaxed memory order
+     * from any context; the writer is whichever core happens to be
+     * advancing the generator. Used by TxBuffer::poll() to mirror the
+     * caret position in the shared TX buffer.
+     */
+    size_t charIndex() const { return _charIdx.load(std::memory_order_relaxed); }
+
     // ----- Sample generation (called from audio task / loop) -----
 
     /**
@@ -136,7 +145,13 @@ private:
     // see junk bytes ('#', '?', NUL) instead of the real text. See
     // docs/winkey.md "Text playback and the audio click bug".
     std::string _playText;
-    size_t _charIdx = 0;    // current character index in _playText
+    // _charIdx is read by TxBuffer::poll() on Core 0 (caret visual) and
+    // written by advanceToNextElement() on whichever core is driving the
+    // audio fill. Relaxed atomic is fine — same pattern as MorseModel::
+    // _encoderChar. The authoritative "this char is now sent" signal
+    // goes through MorseModel::appendDecodedChar()'s atomic path, NOT
+    // through _charIdx.
+    std::atomic<size_t> _charIdx{0};    // current character index in _playText
 
     // Current element info
     bool   _elKeyDown = false;

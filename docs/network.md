@@ -365,6 +365,13 @@ registered at `setup()`, but `_server.begin()` only fires once
 `WiFi.begin()` is non-blocking and the link is rarely up by the time
 `setup()` exits.
 
+#### TX buffer endpoints (v0.6.0+)
+
+The web UI exposes a TX buffer card (type-and-send free-form CW text)
+via five `/api/tx/*` endpoints — see [`docs/tx_buffer.md`](tx_buffer.md)
+for the operator reference. These endpoints use the same shared
+`WebServer` on port 80.
+
 ---
 
 ## 9. Real-time safety

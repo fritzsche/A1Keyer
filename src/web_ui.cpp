@@ -34,12 +34,36 @@
 #include "memory_store.h"
 #include "Log.h"
 #include "winkey.h"
+#include "tx_buffer.h"
 
 // Forward declaration for the inline HTML asset defined at file scope
 // near the bottom of this file. File-scope declaration so the linker
 // sees a single global symbol even though the consumer (handleRoot)
 // lives inside the anonymous namespace below.
 extern const char kIndexHtml[];
+
+// ─── TX-buffer input validation ───────────────────────────────────────────
+//
+// ASCII printable + a small set of accepted punctuation. Multi-byte UTF-8,
+// control characters, and newlines are rejected — MorseEncoder handles
+// neither. Newlines would also confuse the JSON web UI's single-line
+// display. The check is deliberately permissive on punctuation so common
+// CW macros ("CQ CQ DE W1AW K", "5NN/B", "<AR>", "<SK>") go through.
+namespace {
+bool isValidTxChar(unsigned char c) {
+    // Standard printable ASCII.
+    if (c >= 0x20 && c <= 0x7E) return true;
+    return false;
+}
+
+bool isValidTxText(const char* text) {
+    if (!text) return false;
+    for (const char* p = text; *p; ++p) {
+        if (!isValidTxChar((unsigned char)*p)) return false;
+    }
+    return true;
+}
+}  // namespace
 
 namespace {
 
@@ -456,15 +480,250 @@ void handleApiPlay() {
     server.send(200, "application/json", String(reply, n));
 }
 
+// ─── TX-buffer endpoints ───────────────────────────────────────────────────
+//
+// All five endpoints below drive MorseModel::_txBuffer — the same buffer
+// the WinKey host's ADMIN_TX_BUFFER_LOAD/START/CLEAR commands target.
+// Session-only, no NVS persistence. See docs/tx_buffer.md § 4 and § 8.
+
+// Helper: build a JSON snapshot of the TX-buffer state for replies.
+// Includes the same fields /state emits so the client can re-render
+// without an extra round-trip after a successful mutation.
+void sendTxStateReply(int httpCode, bool ok, const char* error) {
+    auto& server = HttpServer::server();
+    auto& m = MorseModel::instance();
+    String reply;
+    reply.reserve(384);
+    reply += "{\"ok\":";
+    reply += ok ? "true" : "false";
+    if (!ok) {
+        reply += ",\"error\":\"";
+        jsonEscape(reply, error ? error : "unknown");
+        reply += '"';
+    }
+    reply += ",\"txLen\":";
+    reply += m.txLen();
+    reply += ",\"txSent\":";
+    reply += m.txSent();
+    reply += ",\"txHead\":";
+    reply += m.txHead();
+    reply += ",\"txChunkStart\":";
+    reply += m.txChunkStart();
+    reply += ",\"txChunkLen\":";
+    reply += m.txChunkLen();
+    reply += ",\"txActive\":";
+    reply += m.txActive() ? "true" : "false";
+    reply += ",\"txEditableStart\":";
+    reply += m.txEditableStart();
+    reply += ",\"txBuffer\":\"";
+    jsonEscape(reply, m.txBuffer());
+    reply += "\"}";
+    server.send(httpCode, "application/json", reply);
+}
+
+// POST /api/tx/text — full-buffer replace. Used on textarea blur and
+// on "Clear + retype" flows. Resets txSent=0 and clears any active
+// session.
+void handleApiTxText() {
+    auto& server = HttpServer::server();
+    if (server.method() != HTTP_POST) {
+        server.send(405, "application/json", "{\"ok\":false,\"error\":\"method not allowed\"}");
+        return;
+    }
+    if (!server.hasArg("plain")) {
+        server.send(400, "application/json", "{\"ok\":false,\"error\":\"missing body\"}");
+        return;
+    }
+    String raw = server.arg("plain");
+    // Extract the "text" field via a one-off scan. Avoids forcing a
+    // generic parser upgrade for this single endpoint.
+    int keyIdx = raw.indexOf("\"text\"");
+    if (keyIdx < 0) {
+        sendTxStateReply(400, false, "missing text");
+        return;
+    }
+    int colon = raw.indexOf(':', keyIdx);
+    if (colon < 0) {
+        sendTxStateReply(400, false, "missing text");
+        return;
+    }
+    int q1 = raw.indexOf('"', colon);
+    if (q1 < 0) {
+        sendTxStateReply(400, false, "missing text");
+        return;
+    }
+    int q2 = raw.indexOf('"', q1 + 1);
+    if (q2 < 0) {
+        sendTxStateReply(400, false, "unterminated text");
+        return;
+    }
+    String text = raw.substring(q1 + 1, q2);
+
+    if (text.length() > (int)(MorseModel::kTxBufLen - 1)) {
+        sendTxStateReply(400, false, "text too long (max 255)");
+        return;
+    }
+    if (!isValidTxText(text.c_str())) {
+        sendTxStateReply(400, false, "invalid characters (ASCII printable only)");
+        return;
+    }
+
+    MorseModel::instance().setTxText(text.c_str());
+    sendTxStateReply(200, true, nullptr);
+    Log::info("[TX] /api/tx/text: len=%d", text.length());
+}
+
+// POST /api/tx/edit — keystroke-level edits. Body: {op:"append"|"backspace"|"clear", c?:"X"}.
+// append + c: appends the single character. backspace: deletes the last
+// editable char. clear: wipes everything.
+void handleApiTxEdit() {
+    auto& server = HttpServer::server();
+    if (server.method() != HTTP_POST) {
+        server.send(405, "application/json", "{\"ok\":false,\"error\":\"method not allowed\"}");
+        return;
+    }
+    if (!server.hasArg("plain")) {
+        server.send(400, "application/json", "{\"ok\":false,\"error\":\"missing body\"}");
+        return;
+    }
+    String raw = server.arg("plain");
+
+    // Extract "op" field.
+    int opIdx = raw.indexOf("\"op\"");
+    if (opIdx < 0) {
+        sendTxStateReply(400, false, "missing op");
+        return;
+    }
+    int opColon = raw.indexOf(':', opIdx);
+    if (opColon < 0) {
+        sendTxStateReply(400, false, "missing op");
+        return;
+    }
+    int opQ1 = raw.indexOf('"', opColon);
+    if (opQ1 < 0) {
+        sendTxStateReply(400, false, "missing op");
+        return;
+    }
+    int opQ2 = raw.indexOf('"', opQ1 + 1);
+    if (opQ2 < 0) {
+        sendTxStateReply(400, false, "unterminated op");
+        return;
+    }
+    String op = raw.substring(opQ1 + 1, opQ2);
+
+    auto& model = MorseModel::instance();
+
+    if (op == "append") {
+        // Extract "c" field.
+        int cIdx = raw.indexOf("\"c\"");
+        if (cIdx < 0) {
+            sendTxStateReply(400, false, "append requires c");
+            return;
+        }
+        int cColon = raw.indexOf(':', cIdx);
+        if (cColon < 0) {
+            sendTxStateReply(400, false, "append requires c");
+            return;
+        }
+        int cQ1 = raw.indexOf('"', cColon);
+        if (cQ1 < 0) {
+            sendTxStateReply(400, false, "append requires c");
+            return;
+        }
+        int cQ2 = raw.indexOf('"', cQ1 + 1);
+        if (cQ2 < 0 || cQ2 - cQ1 - 1 != 1) {
+            sendTxStateReply(400, false, "c must be a single char");
+            return;
+        }
+        char c = raw.charAt(cQ1 + 1);
+        if (!isValidTxChar((unsigned char)c)) {
+            sendTxStateReply(400, false, "invalid character");
+            return;
+        }
+        bool ok = model.appendTxChar(c);
+        if (!ok) {
+            sendTxStateReply(400, false, "buffer full (max 255)");
+            return;
+        }
+        sendTxStateReply(200, true, nullptr);
+        return;
+    }
+    if (op == "backspace") {
+        bool removed = model.backspaceTx();
+        if (!removed) {
+            sendTxStateReply(400, false, "nothing to backspace");
+            return;
+        }
+        sendTxStateReply(200, true, nullptr);
+        return;
+    }
+    if (op == "clear") {
+        model.clearTx();
+        sendTxStateReply(200, true, nullptr);
+        return;
+    }
+    sendTxStateReply(400, false, "unknown op");
+}
+
+// POST /api/tx/start — arm playback. No-op if already active or nothing to send.
+void handleApiTxStart() {
+    auto& server = HttpServer::server();
+    if (server.method() != HTTP_POST) {
+        server.send(405, "application/json", "{\"ok\":false,\"error\":\"method not allowed\"}");
+        return;
+    }
+    auto& m = MorseModel::instance();
+    if (m.txActive()) {
+        sendTxStateReply(400, false, "already active");
+        return;
+    }
+    if (m.txSent() >= m.txLen()) {
+        sendTxStateReply(400, false, "nothing to send");
+        return;
+    }
+    TxBuffer::beginSession();
+    sendTxStateReply(200, true, nullptr);
+    Log::info("[TX] /api/tx/start: sent=%zu len=%zu", m.txSent(), m.txLen());
+}
+
+// POST /api/tx/stop — cancel in-flight playback. Pending preserved.
+void handleApiTxStop() {
+    auto& server = HttpServer::server();
+    if (server.method() != HTTP_POST) {
+        server.send(405, "application/json", "{\"ok\":false,\"error\":\"method not allowed\"}");
+        return;
+    }
+    MorseModel::instance().stopTx();
+    sendTxStateReply(200, true, nullptr);
+    Log::info("[TX] /api/tx/stop");
+}
+
+// POST /api/tx/clear — wipe everything.
+void handleApiTxClear() {
+    auto& server = HttpServer::server();
+    if (server.method() != HTTP_POST) {
+        server.send(405, "application/json", "{\"ok\":false,\"error\":\"method not allowed\"}");
+        return;
+    }
+    MorseModel::instance().clearTx();
+    sendTxStateReply(200, true, nullptr);
+    Log::info("[TX] /api/tx/clear");
+}
+
 }  // namespace
 
 void WebUI::begin(uint16_t port) {
     (void)port;
     using namespace HttpServer;
-    addRoute((uint16_t)HTTP_GET,  "/",             handleRoot);
-    addRoute((uint16_t)HTTP_POST, "/api/settings", handleApiSettings);
-    addRoute((uint16_t)HTTP_POST, "/api/memory",   handleApiMemory);
-    addRoute((uint16_t)HTTP_POST, "/api/play",     handleApiPlay);
+    addRoute((uint16_t)HTTP_GET,  "/",              handleRoot);
+    addRoute((uint16_t)HTTP_POST, "/api/settings",  handleApiSettings);
+    addRoute((uint16_t)HTTP_POST, "/api/memory",    handleApiMemory);
+    addRoute((uint16_t)HTTP_POST, "/api/play",      handleApiPlay);
+    addRoute((uint16_t)HTTP_POST, "/api/tx/text",   handleApiTxText);
+    addRoute((uint16_t)HTTP_POST, "/api/tx/edit",   handleApiTxEdit);
+    addRoute((uint16_t)HTTP_POST, "/api/tx/start",  handleApiTxStart);
+    addRoute((uint16_t)HTTP_POST, "/api/tx/stop",   handleApiTxStop);
+    addRoute((uint16_t)HTTP_POST, "/api/tx/clear",  handleApiTxClear);
 }
 
 void WebUI::poll() {
@@ -536,10 +795,26 @@ button{min-height:44px;padding:8px 14px;background:var(--bg);
 button:hover{border-color:var(--accent)}
 button:active{transform:translateY(1px)}
 button.primary{background:var(--accent);color:#0e1116;border-color:var(--accent);font-weight:600}
+button.warn{background:var(--warn);color:#0e1116;border-color:var(--warn);font-weight:600}
 .mem{display:grid;grid-template-columns:54px 1fr auto auto;gap:8px;align-items:center;
   margin-bottom:8px}
 .mem button{min-width:64px}
 .mem label{font-weight:600;color:var(--muted)}
+
+/* TX buffer card — three regions side by side */
+.tx-display{display:flex;align-items:center;gap:0;font:20px/1.4 ui-monospace,Menlo,Consolas,monospace;
+  background:var(--bg);border:1px solid var(--border);border-radius:6px;
+  padding:6px 10px;min-height:36px;overflow-x:auto;white-space:nowrap}
+.tx-sent{color:var(--muted)}
+.tx-flight{color:var(--accent);position:relative}
+.tx-flight::after{content:"";position:absolute;left:0;right:0;bottom:-2px;
+  height:2px;background:var(--accent);animation:blink 1s step-end infinite}
+@keyframes blink{50%{opacity:0}}
+.tx-pending{flex:1;min-width:80px;background:transparent;border:0;
+  color:var(--fg);font:inherit;outline:none;padding:0}
+.tx-pending::placeholder{color:var(--muted)}
+.tx-controls{display:flex;gap:8px;align-items:center;margin-top:10px}
+.tx-controls .hint{margin-left:auto}
 .banner{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);
   background:var(--err);color:#fff;padding:10px 14px;border-radius:6px;
   box-shadow:0 4px 12px rgba(0,0,0,.4);font-size:14px;display:none}
@@ -556,6 +831,22 @@ button.primary{background:var(--accent);color:#0e1116;border-color:var(--accent)
   <section class="card col-span-2" id="decodedCard">
     <h2>Live decode</h2>
     <pre id="decoded"></pre>
+  </section>
+  <section class="card col-span-2" id="txCard">
+    <h2>TX buffer</h2>
+    <div class="tx-display">
+      <span id="txSent"   class="tx-sent"></span>
+      <span id="txFlight" class="tx-flight"></span>
+      <input id="txPending" type="text" class="tx-pending"
+             maxlength="255" autocomplete="off" spellcheck="false"
+             placeholder="Type to compose. Click TX to transmit." />
+    </div>
+    <div class="tx-controls">
+      <button id="txStart" class="primary">TX</button>
+      <button id="txStop"  class="warn" hidden>Stop</button>
+      <button id="txClear">Clear</button>
+      <span id="txStatus" class="hint"></span>
+    </div>
   </section>
   <section class="card">
     <h2>Settings</h2>
@@ -646,6 +937,7 @@ button.primary{background:var(--accent);color:#0e1116;border-color:var(--accent)
     // so keep the rightmost content in view.
     dec.scrollLeft = dec.scrollWidth;
     renderMemory(s.memory || []);
+    renderTx(s);
     var wifi = $("wifi");
     if (s.wifiIP && s.wifiIP !== "0.0.0.0"){
       wifi.className = "pill on";
@@ -722,6 +1014,67 @@ button.primary{background:var(--accent);color:#0e1116;border-color:var(--accent)
           if (btns.length >= 1) btns[0].disabled = !arr[j];
         }
       }
+    }
+  }
+
+  // ─── TX buffer ─────────────────────────────────────────────────────────
+  //
+  // Renders three regions from /state: sent (locked, grey), in-flight
+  // (locked, accent), pending (editable input). The pending input is
+  // bound to buffer.slice(txEditableStart) — characters before that
+  // index are immutable (the operator can't see them in the input).
+  // The "dirty" pattern from bindMemory is reused so a poll during
+  // mid-typing doesn't clobber the user's input.
+  function renderTx(s){
+    if (!s) return;
+    var sent    = s.txSent    || 0;
+    var head    = s.txHead    || 0;
+    var len     = s.txLen     || 0;
+    var active  = !!s.txActive;
+    var buf     = s.txBuffer  || "";
+    var cStart  = s.txChunkStart || 0;
+    var cLen    = s.txChunkLen   || 0;
+
+    var sentSpan  = $("txSent");
+    var flightSpan= $("txFlight");
+    var pending   = $("txPending");
+    var startBtn  = $("txStart");
+    var stopBtn   = $("txStop");
+    var status    = $("txStatus");
+
+    sentSpan.textContent  = buf.substring(0, sent);
+    // In-flight region: chars from txSent to the end of the current
+    // chunk (txChunkStart + txChunkLen). Empty when no chunk is playing.
+    var flightEnd = (cLen > 0) ? (cStart + cLen) : sent;
+    flightSpan.textContent = buf.substring(sent, flightEnd);
+
+    // The pending input shows the editable tail (everything from
+    // txEditableStart). Re-sync from /state only when the user isn't
+    // mid-typing (the dirty flag protects in-progress edits).
+    var editableStart = sent; // matches txEditableStart when cLen==0
+    if (cLen > 0) editableStart = cStart + cLen;
+    var expected = buf.substring(editableStart);
+    if (pending.dataset.dirty !== "1" && pending.value !== expected) {
+      pending.value = expected;
+    }
+    if (pending.dataset.dirty === "1" && pending.value === expected) {
+      pending.dataset.dirty = "0";
+    }
+
+    // Buttons reflect state.
+    startBtn.disabled = active || (sent >= len && len > 0) || len === 0;
+    startBtn.hidden   = active;
+    stopBtn.hidden    = !active;
+
+    // Status text: short summary of progress.
+    if (active) {
+      status.textContent = "sending — " + sent + " / " + len + " chars";
+    } else if (len === 0) {
+      status.textContent = "idle";
+    } else if (sent >= len) {
+      status.textContent = "complete — " + len + " chars sent";
+    } else {
+      status.textContent = "armed — " + (len - sent) + " pending";
     }
   }
 
@@ -830,9 +1183,117 @@ button.primary{background:var(--accent);color:#0e1116;border-color:var(--accent)
     });
   }
 
+  function bindTx(){
+    var pending = $("txPending");
+    if (!pending) return;
+
+    // Keystroke-level edits. We POST one edit per character to keep
+    // the server authoritative — the polled /state is reconciled with
+    // the input on every tick (with the dirty flag guarding against
+    // race-induced stomping).
+    pending.addEventListener("input", function(ev){
+      var el = ev.target;
+      var newVal = el.value;
+      var prevVal = el.dataset.prevValue || "";
+      el.dataset.dirty = "1";
+      if (newVal.length > prevVal.length) {
+        // Insert — POST the appended char(s).
+        for (var i = prevVal.length; i < newVal.length; i++){
+          (function(c){
+            postJson("/api/tx/edit", {op:"append", c:c}).then(function(res){
+              if (!res.ok){
+                el.dataset.dirty = "0";
+                showBanner("TX edit: " + (res.body && res.body.error || ("HTTP " + res.status)));
+                pollState();
+              } else if (i === newVal.length - 1) {
+                el.dataset.dirty = "0";
+                pollState();
+              }
+            }).catch(function(){
+              showBanner("TX edit failed — device offline?");
+              el.dataset.dirty = "0";
+              pollState();
+            });
+          })(newVal.charAt(i));
+        }
+      } else if (newVal.length < prevVal.length) {
+        // Backspace — POST one backspace per removed char.
+        var removed = prevVal.length - newVal.length;
+        var posted = 0;
+        function postBs(){
+          postJson("/api/tx/edit", {op:"backspace"}).then(function(res){
+            if (!res.ok){
+              el.dataset.dirty = "0";
+              showBanner("TX backspace: " + (res.body && res.body.error || ("HTTP " + res.status)));
+              pollState();
+              return;
+            }
+            posted++;
+            if (posted >= removed){
+              el.dataset.dirty = "0";
+              pollState();
+            } else {
+              postBs();
+            }
+          }).catch(function(){
+            showBanner("TX backspace failed — device offline?");
+            el.dataset.dirty = "0";
+            pollState();
+          });
+        }
+        postBs();
+      }
+      el.dataset.prevValue = newVal;
+    });
+
+    // TX button — arm the session.
+    $("txStart").addEventListener("click", function(){
+      var btn = $("txStart");
+      btn.disabled = true;
+      postJson("/api/tx/start", {}).then(function(res){
+        btn.disabled = false;
+        if (!res.ok){
+          showBanner("TX start failed: " + (res.body && res.body.error || ("HTTP " + res.status)));
+        }
+        pollState();
+      }).catch(function(){
+        btn.disabled = false;
+        showBanner("TX start failed — device offline?");
+      });
+    });
+
+    // Stop button — cancel in-flight.
+    $("txStop").addEventListener("click", function(){
+      postJson("/api/tx/stop", {}).then(function(res){
+        if (!res.ok) showBanner("TX stop failed");
+        pollState();
+      }).catch(function(){
+        showBanner("TX stop failed — device offline?");
+      });
+    });
+
+    // Clear button — confirm, then wipe.
+    $("txClear").addEventListener("click", function(){
+      if (!confirm("Clear TX buffer?")) return;
+      postJson("/api/tx/clear", {}).then(function(res){
+        if (!res.ok) showBanner("TX clear failed");
+        var pendingEl = $("txPending");
+        if (pendingEl){
+          pendingEl.value = "";
+          pendingEl.dataset.dirty = "0";
+          pendingEl.dataset.prevValue = "";
+        }
+        pollState();
+      }).catch(function(){
+        showBanner("TX clear failed — device offline?");
+      });
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", function(){
     bindSettings();
     bindMemory();
+    bindTx();
     pollState();
     setInterval(pollState, 500);
   });

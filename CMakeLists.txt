@@ -32,6 +32,7 @@ set(LIB_SOURCES
     src/net_config.cpp
     src/memory_store.cpp
     src/network_manager.cpp
+    src/tx_buffer.cpp
 )
 
 # ---------------------------------------------------------------------------
@@ -59,6 +60,7 @@ foreach(SUITE IN ITEMS
     test_diag_iambic_collision
     test_mg_keyed_boundary
     test_wabun
+    test_tx_buffer
 )
     add_executable(${SUITE}
         test/${SUITE}/${SUITE}.cpp
