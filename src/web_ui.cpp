@@ -1040,6 +1040,7 @@ button.warn{background:var(--warn);color:#0e1116;border-color:var(--warn);font-w
     var pending   = $("txPending");
     var startBtn  = $("txStart");
     var stopBtn   = $("txStop");
+    var txClear   = $("txClear");
     var status    = $("txStatus");
 
     sentSpan.textContent  = buf.substring(0, sent);
@@ -1062,9 +1063,11 @@ button.warn{background:var(--warn);color:#0e1116;border-color:var(--warn);font-w
     }
 
     // Buttons reflect state.
-    startBtn.disabled = active || (sent >= len && len > 0) || len === 0;
-    startBtn.hidden   = active;
-    stopBtn.hidden    = !active;
+    startBtn.disabled = len === 0;
+    startBtn.textContent = active ? "Stop" : "TX";
+    startBtn.className = active ? "warn" : "primary";
+    stopBtn.hidden   = true;  // TX button doubles as Stop when active
+    txClear.hidden = active;  // hide Clear while active
 
     // Status text: short summary of progress.
     if (active) {
@@ -1246,19 +1249,24 @@ button.warn{background:var(--warn);color:#0e1116;border-color:var(--warn);font-w
       el.dataset.prevValue = newVal;
     });
 
-    // TX button — arm the session.
+    // TX button — toggle: start when idle, stop when active.
+    // Uses the button's own textContent (set by renderTx) rather than
+    // last.txActive so the toggle works even before the first /state poll.
     $("txStart").addEventListener("click", function(){
       var btn = $("txStart");
       btn.disabled = true;
-      postJson("/api/tx/start", {}).then(function(res){
+      var active = (btn.textContent === "Stop");
+      var url = active ? "/api/tx/stop" : "/api/tx/start";
+      postJson(url, {}).then(function(res){
         btn.disabled = false;
         if (!res.ok){
-          showBanner("TX start failed: " + (res.body && res.body.error || ("HTTP " + res.status)));
+          showBanner("TX " + (active ? "stop" : "start") + " failed: "
+                     + (res.body && res.body.error || ("HTTP " + res.status)));
         }
         pollState();
       }).catch(function(){
         btn.disabled = false;
-        showBanner("TX start failed — device offline?");
+        showBanner("TX " + (active ? "stop" : "start") + " failed — device offline?");
       });
     });
 
@@ -1287,6 +1295,16 @@ button.warn{background:var(--warn);color:#0e1116;border-color:var(--warn);font-w
       }).catch(function(){
         showBanner("TX clear failed — device offline?");
       });
+    });
+
+    // ESC key on window — stop TX. Bind to window so the keydown is
+    // captured regardless of focus (matches fldigi/MMTTY convention).
+    window.addEventListener("keydown", function(ev){
+      if (ev.key === "Escape") {
+        postJson("/api/tx/stop", {}).then(function(){
+          pollState();
+        });
+      }
     });
   }
 

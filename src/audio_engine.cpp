@@ -303,6 +303,7 @@ void AudioEngine::fillBuffer(int16_t* out, size_t stereoFrames) {
         (MorseKey::isDitPressed() || MorseKey::isDahPressed())) {
         s_morseGen->stop();
         MorseModel::instance().setMode(KeyerMode::KEYER);
+        MorseModel::instance().stopTx();
         s_paddleSuppressed = true;
     }
 

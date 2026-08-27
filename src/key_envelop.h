@@ -92,5 +92,6 @@ private:
     size_t _rampLen = 0;
 
     std::atomic<bool>  _dirty = true;       // set when WPM/rampTime changes
+    std::atomic<bool>  _regenerating = false; // prevents concurrent regenerate()
     uint32_t _generationVersion = 0;
 };

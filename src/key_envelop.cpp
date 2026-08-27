@@ -70,14 +70,43 @@ void KeyEnvelop::setRampTime(float seconds) {
 }
 
 // ---------------------------------------------------------------------------
-// regenerate — pre-allocate ALL new buffers before touching any state
+// regenerate — free old buffers FIRST, then allocate new ones.
+//
+// To avoid OOM at low WPM (where envelopes are large), we release the
+// old buffers before allocating new ones. The sequence is:
+//
+//   1. Set _dirty = false  ← audio task stops trying to regenerate
+//   2. Set _regenerating = true  ← guard against concurrent calls
+//   3. Free old buffers (valid data survives in _ditEnv until step 4)
+//   4. Allocate new buffers
+//   5. If OOM: set _regenerating = false, return (nothing changed)
+//   6. Fill new envelopes
+//   7. Swap _ditEnv / _dahEnv to new buffers
+//   8. Free old buffers
+//   9. Set _regenerating = false
+//
+// Between steps 1 and 7, the audio task sees _dirty=false and reads
+// the OLD _ditEnv (valid until freed in step 8). After step 7, it reads
+// the NEW buffers. No reader ever sees nullptr.
 // ---------------------------------------------------------------------------
 void KeyEnvelop::regenerate() {
     ++_generationVersion;
     const bool wasDirty = _dirty.load();
-    Log::debug("[KE] regenerate ENTER: wpm=%d dirty=%d", _wpm, wasDirty ? 1 : 0);
 
-    // Compute target sizes up-front
+    // Guard against concurrent calls from two cores.
+    bool expected = false;
+    if (!_regenerating.compare_exchange_strong(expected, true)) {
+        Log::debug("[KE] regenerate SKIP: already regenerating");
+        return;
+    }
+
+    // Clear dirty flag NOW — the audio task stops trying to regenerate
+    // and will read the old (still-valid) buffers until the swap below.
+    _dirty = false;
+
+    Log::debug("[KE] regenerate ENTER: wpm=%d", _wpm);
+
+    // Compute target sizes
     size_t nDit  = static_cast<size_t>(std::round(_sampleRate * 1.2f / _wpm));
     size_t nRamp = static_cast<size_t>(std::round(_rampTimeSec * _sampleRate));
     if (nRamp > nDit / 4) nRamp = nDit / 4;
@@ -85,19 +114,41 @@ void KeyEnvelop::regenerate() {
     size_t nDitEnv = nDit * 2;
     size_t nDahEnv = nDit * 4;
 
-    // Allocate all new buffers first (nothrow so OOM returns nullptr, no abort)
-    float* ramp  = new (std::nothrow) float[nRamp];
-    float* ramp2 = ramp ? new (std::nothrow) float[nRamp] : nullptr;
-    float* dEnv  = ramp2 ? new (std::nothrow) float[nDitEnv]() : nullptr;  // () zero-inits
-    float* dhEnv = dEnv  ? new (std::nothrow) float[nDahEnv]() : nullptr; // () zero-inits
+    // Save old state before freeing
+    float* oldD = _ditEnv;
+    float* oldH = _dahEnv;
+    size_t oldDitLen = _ditLen;
+    size_t oldDahLen = _dahLen;
+    size_t oldRampLen = _rampLen;
 
-    if (!ramp || !ramp2 || !dEnv || !dhEnv) {
-        Log::warning("[KE] OOM: ramp=%p ramp2=%p dEnv=%p dhEnv=%p  ← keep old",
-            (void*)ramp, (void*)ramp2, (void*)dEnv, (void*)dhEnv);
-        delete[] ramp; delete[] ramp2; delete[] dEnv; delete[] dhEnv;
-        Log::warning("[KE]   old kept: ditEnv=%p(%zu) dahEnv=%p(%zu)",
-            (void*)_ditEnv, _ditLen * 2, (void*)_dahEnv, _ditLen * 4);
-        _dirty = false;   // use old buffers, don't retry
+    // Free OLD buffers first to reduce peak memory (prevents OOM at
+    // low WPM where old+new would exceed heap).
+    _ditEnv = nullptr;
+    _dahEnv = nullptr;
+    _ditLen = 0;
+    _dahLen = 0;
+    _rampLen = 0;
+
+    // Allocate the BIGGEST buffers FIRST so OOM is detected early.
+    // Original code allocated (ramp→ramp2→dEnv→dhEnv) — smallest first —
+    // which wasted heap on small allocations when the big one would fail.
+    float* dhEnv = new (std::nothrow) float[nDahEnv]();  // () zero-inits
+    float* dEnv  = dhEnv ? new (std::nothrow) float[nDitEnv]() : nullptr;
+    float* ramp  = dEnv  ? new (std::nothrow) float[nRamp] : nullptr;
+    float* ramp2 = ramp  ? new (std::nothrow) float[nRamp] : nullptr;
+
+    if (!dhEnv || !dEnv || !ramp || !ramp2) {
+        Log::warning("[KE] OOM: dhEnv=%p dEnv=%p ramp=%p ramp2=%p  ← keep old",
+            (void*)dhEnv, (void*)dEnv, (void*)ramp, (void*)ramp2);
+        delete[] dhEnv; delete[] dEnv; delete[] ramp; delete[] ramp2;
+        _ditEnv = oldD;
+        _dahEnv = oldH;
+        _ditLen = oldDitLen;
+        _dahLen = oldDahLen;
+        _rampLen = oldRampLen;
+        Log::warning("[KE]   restored old buffers dit=%zu dah=%zu",
+            oldDitLen, oldDahLen);
+        _regenerating.store(false);
         return;
     }
 
@@ -120,21 +171,22 @@ void KeyEnvelop::regenerate() {
     delete[] ramp;
     delete[] ramp2;
 
-    // Atomic swap
-    float* oldD = _ditEnv;
-    float* oldH = _dahEnv;
+    // Swap new buffers in
     _ditEnv = dEnv;
     _dahEnv = dhEnv;
     _ditLen = nDit;
     _dahLen = nDit * 3;
     _rampLen = nRamp;
-    _dirty = false;
 
     Log::debug("[KE] regenerate DONE: ditEnv=%p(%zu) dahEnv=%p(%zu) rampLen=%zu",
         (void*)_ditEnv, _ditLen * 2, (void*)_dahEnv, _ditLen * 4, _rampLen);
 
+    // Free old buffers — safe now: _dirty=false and _ditEnv points to
+    // the new buffers, so the audio task reads the new data.
     delete[] oldD;
     delete[] oldH;
+
+    _regenerating.store(false);
 }
 
 // ---------------------------------------------------------------------------

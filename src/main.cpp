@@ -65,16 +65,24 @@ static CardputerKeyState pollKeys() {
     CardputerKeyState ks{};
 #ifdef BOARD_CARDPUTER
     auto& kb = M5Cardputer.Keyboard;
+    // Read fn-layer flags BEFORE the empty-list check: the Fn-layer
+    // PASS 2 (Keyboard.cpp) sets esc/del/arrows and returns early
+    // before populating word/keyList, so keyList is empty while Fn
+    // is held. Without this, pollKeys() always returns ks.escape=false
+    // for Fn+` (ESC) because the early-exit below skips st.esc.
+    const auto& st = kb.keysState();
+    ks.escape    = st.esc;
+    ks.fn        = st.fn;
+    ks.left      = st.left;
+    ks.right     = st.right;
+    ks.backspace = st.backspace;
+
     if (kb.keyList().empty()) return ks;
 
-    const auto& st = kb.keysState();
     ks.anyKey    = true;
     ks.shift     = st.shift;
-    ks.fn        = st.fn;
     ks.opt       = st.opt;
     ks.enter     = kb.isKeyPressed(KEY_ENTER);
-    ks.backspace = st.backspace;
-    ks.escape    = st.esc;
     // Fn-layer arrows. The keyboard library populates these on the
     // fn-layer pass (Keyboard.cpp PASS 2) and returns early before
     // PASS 3, so `word` is empty whenever `fn` is held — that means
@@ -730,6 +738,11 @@ static void handleKeyboard() {
     bool jKey       = kb.isKeyPressed('J') || kb.isKeyPressed('j');
     bool xKey       = kb.isKeyPressed('X') || kb.isKeyPressed('x');
     bool enter      = kb.isKeyPressed(KEY_ENTER);
+    // ESC = Fn+` on Cardputer. Also accept bare backtick (0x60) as ESC
+    // since the Cardputer has no dedicated ESC key and users expect the
+    // ESC = bare backtick (0x60) on Cardputer — the keyboard's
+    // keysState().esc is never set, so we check the key directly.
+    bool esc        = M5Cardputer.Keyboard.isKeyPressed('`');
     bool shift      = kb.keysState().shift;
     bool btnA       = M5Cardputer.BtnA.isPressed();
     bool semicolon  = kb.isKeyPressed(';');
@@ -786,17 +799,21 @@ static void handleKeyboard() {
     // after it was started by the SAME press — which would otherwise
     // cut off audio after only a click of the first element.
     static bool s_wasAnyKeyHeld = false;
+    static bool s_wasEsc = false;
     const bool anyKeyHeld = wKey || fKey || pKey || vKey || mKey
                           || kKey || dKey || cKey || nKey || aKey || sKey || jKey || xKey
                           || enter || semicolon || period;
     const bool anyKeyEdge = anyKeyHeld && !s_wasAnyKeyHeld;
+    const bool escEdge    = esc && !s_wasEsc;
     s_wasAnyKeyHeld = anyKeyHeld;
+    s_wasEsc = esc;
 
-    if (gen && gen->isPlaying() && anyKeyEdge) {
+    if (gen && gen->isPlaying() && (anyKeyEdge || escEdge)) {
         Log::write("[GATE] cancelling playback (edge) — list=%d printable=%02x\n",
             (int)kb.keyList().size(), (unsigned)pollKeys().printable);
         gen->stop();
         model.setMode(KeyerMode::KEYER);
+        MorseModel::instance().stopTx();
     }
     if (gen && gen->isPlaying() && anyKeyHeld) {
         // Same press still held — consume it: update wasX so the per-key
@@ -1455,6 +1472,18 @@ void loop() {
     // attached. Cheap on idle ticks: a single atomic load returns false
     // and the function returns.
     TxBuffer::poll();
+
+    // ESC key (Fn+`) during TX buffer playback: stop the session even
+    // if the generator is idle between chunks.
+#ifdef BOARD_CARDPUTER
+    if (MorseModel::instance().txActive()) {
+        bool escHeld = M5Cardputer.Keyboard.isKeyPressed('`');
+        if (escHeld) {
+            Log::write("[TX] ESC detected (keysState().esc=%d) — stopping session\n", escHeld);
+            MorseModel::instance().stopTx();
+        }
+    }
+#endif
 
 #ifdef BOARD_CARDPUTER
     // Update headphone state
