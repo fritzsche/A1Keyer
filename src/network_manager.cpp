@@ -352,6 +352,8 @@ void disconnectCurrent() {
         s_apClients = 0;
         clearApEvents();
         setError("");
+        // Switch to STATION mode so C → scan → connect works
+        s_mode = NetMode::STATION;
         setState(NetState::IDLE);
         break;
     case NetState::SCANNING:
@@ -861,9 +863,10 @@ bool halStartAp(const char* ssid, const char* pass) {
 }
 
 void halStopAp() {
-    // wifioff=false — keep the radio subsystem alive so a subsequent
-    // startAp() does not have to re-initialise the Wi-Fi driver.
-    WiFi.softAPdisconnect(/*wifioff=*/false);
+    // Full radio power-down. This implicitly stops the AP.
+    // The wifioff=true variant of softAPdisconnect switches to STA mode,
+    // which is not what we want — we want the radio completely silent.
+    WiFi.mode(WIFI_OFF);
 }
 
 uint8_t halApStations() {

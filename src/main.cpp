@@ -43,6 +43,11 @@
 #endif
 
 // ---------------------------------------------------------------------------
+// Forward declarations
+// ---------------------------------------------------------------------------
+static void mirrorWifiState(MorseModel& model);
+
+// ---------------------------------------------------------------------------
 // pollKeys — sample the Cardputer keyboard once into a CardputerKeyState.
 //
 // Reads modifier flags, special keys (Enter, Backspace, Esc) and the first
@@ -364,10 +369,14 @@ static void handleWifiScreen(MorseModel& model, const CardputerKeyState& ks) {
 
         if (xKey && !wasX) {
             if (apMode) {
-                // Drop the AP only. AP password stays in NVS so the
-                // user can press A again without retyping. STA creds
-                // are untouched.
+                Log::write("[KB] X in AP mode: stopping AP\n");
                 WifiMgr::disconnectCurrent();
+                // Force radio to OFF at the HAL level too.
+                WiFi.mode(WIFI_OFF);
+                mirrorWifiState(model);
+                model.setScreen(DisplayScreen::DECODER);
+                Log::write("[KB] X done: mode=%d state=%d\n",
+                    (int)WifiMgr::mode(), (int)WifiMgr::state());
             } else {
                 // STA: destructive — open the Y/N ask. STA creds are
                 // the only thing erased.
@@ -695,6 +704,7 @@ static void handleKeyboard() {
     static bool wasC = false, wasN = false, wasA = false;
     static bool wasS = false;
     static bool wasJ = false;
+    static bool wasX = false;
     static bool wasEnter = false, wasShift = false;
     static bool wasBtnA = false;
     static bool wasSemicolon = false, wasPeriod = false;
@@ -717,6 +727,7 @@ static void handleKeyboard() {
     bool aKey       = kb.isKeyPressed('A') || kb.isKeyPressed('a');
     bool sKey       = kb.isKeyPressed('S') || kb.isKeyPressed('s');
     bool jKey       = kb.isKeyPressed('J') || kb.isKeyPressed('j');
+    bool xKey       = kb.isKeyPressed('X') || kb.isKeyPressed('x');
     bool enter      = kb.isKeyPressed(KEY_ENTER);
     bool shift      = kb.keysState().shift;
     bool btnA       = M5Cardputer.BtnA.isPressed();
@@ -775,7 +786,7 @@ static void handleKeyboard() {
     // cut off audio after only a click of the first element.
     static bool s_wasAnyKeyHeld = false;
     const bool anyKeyHeld = wKey || fKey || pKey || vKey || mKey
-                          || kKey || dKey || cKey || nKey || aKey || sKey || jKey
+                          || kKey || dKey || cKey || nKey || aKey || sKey || jKey || xKey
                           || enter || semicolon || period;
     const bool anyKeyEdge = anyKeyHeld && !s_wasAnyKeyHeld;
     s_wasAnyKeyHeld = anyKeyHeld;
@@ -790,7 +801,7 @@ static void handleKeyboard() {
         // Same press still held — consume it: update wasX so the per-key
         // edge handlers below don't fire on this held press.
         wasW = wKey; wasF = fKey; wasP = pKey; wasV = vKey; wasM = mKey;
-        wasK = kKey; wasD = dKey; wasC = cKey; wasN = nKey; wasA = aKey; wasS = sKey; wasJ = jKey;
+        wasK = kKey; wasD = dKey; wasC = cKey; wasN = nKey; wasA = aKey; wasS = sKey; wasJ = jKey; wasX = xKey;
         wasEnter = enter; wasShift = shift; wasBtnA = btnA;
         wasSemicolon = semicolon; wasPeriod = period;
         return;
@@ -930,6 +941,32 @@ static void handleKeyboard() {
         DisplayTask::requestRender();
     }
     wasN = nKey;
+
+    // X → stop AP (from any screen). 
+    if (xKey && !wasX) {
+        Log::write("[KB] X pressed, mode=%d state=%d\n",
+            (int)WifiMgr::mode(), (int)WifiMgr::state());
+        WifiMgr::disconnectCurrent();
+        WiFi.mode(WIFI_OFF);
+        // Force the model and NVS to STATION so subsequent N-screen reads
+        // show the radio as disconnected and the next boot comes up clean.
+        model.setWifiMode((int)NetMode::STATION);
+        model.setWifiState((int)NetState::IDLE);
+        {
+            NetConfig cfg;
+            netConfigLoad(cfg);
+            cfg.mode = NetMode::STATION;
+            netConfigSave(cfg);
+        }
+        if (sc == DisplayScreen::WIFI_NETWORK_INFO) {
+            model.setScreen(DisplayScreen::DECODER);
+        }
+        DisplayTask::requestRender();
+        Log::write("[KB] X done: mode=%d state=%d model_mode=%d\n",
+            (int)WifiMgr::mode(), (int)WifiMgr::state(),
+            model.wifiMode());
+    }
+    wasX = xKey;
 
     // K → keying settings (toggle On/Off radio output). Suppresses a
     // single follow-up press for hold-to-key so opening the overlay
